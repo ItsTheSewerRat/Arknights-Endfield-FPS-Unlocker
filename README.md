@@ -27,7 +27,12 @@ use the same proton version as game and run the exe. <br />
 (Note, EXE must be in the same directory that Proton installed the game to, directly next to the endfield.exe <br />
 This is usually at ~/.local/share/Steam/steamapps/compatdata/ one of the folders in there will have the game)
 Then add this command to endfield launch options: <br />
-WINEDLLOVERRIDES=vulkan-1=n,b %command% <br /> https://www.reddit.com/user/K255178K/ Pointed this out. Not me. 
+WINEDLLOVERRIDES=vulkan-1=n,b %command% <br /> https://www.reddit.com/user/K255178K/ Pointed this out. Not me. <br />
+
+Manual Installation: <br />
+Download ace_inject.dll, vulkan-1.dll & d3dcompiler_47.dll from the /bin/ directory from this repo <br />
+Put in the same directory as the endfield executable. <br />
+Run the game. <br />
 
 ## -- HOW TO UNINSTALL <br /> 
 Remove vulkan-1.dll from root directory <br />
