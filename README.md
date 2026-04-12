@@ -24,6 +24,8 @@ then run the unlocker exe and input the desired FPS value. <br />
 
 Linux: <br />
 use the same proton version as game and run the exe. <br />
+(Note, EXE must be in the same directory that Proton installed the game to, directly next to the endfield.exe <br />
+This is usually at ~/.local/share/Steam/steamapps/compatdata/ one of the folders in there will have the game)
 Then add this command to endfield launch options: <br />
 WINEDLLOVERRIDES=vulkan-1=n,b %command% <br /> https://www.reddit.com/user/K255178K/ Pointed this out. Not me. 
 
