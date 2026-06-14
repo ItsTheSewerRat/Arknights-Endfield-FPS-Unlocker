@@ -805,6 +805,90 @@ bool SetSettingParameterValue(const char *settingName, int value,
   return true;
 }
 
+bool SetSettingParameterBoolValue(const char *settingName, int value,
+                                  IntWriteInfo *writeInfo = nullptr) {
+  if (writeInfo)
+    *writeInfo = {};
+
+  if (!il2cpp_class_get_field_from_name || !il2cpp_field_static_get_value ||
+      !il2cpp_field_get_offset)
+    return false;
+
+  Il2CppImage coreImage = FindImage("UnityEngine.CoreModule");
+  if (!coreImage)
+    return false;
+
+  Il2CppClass rpmClass = il2cpp_class_from_name(
+      coreImage, "UnityEngine.Rendering", "RenderPipelineManager");
+  if (!rpmClass)
+    return false;
+
+  void *pipelineField = il2cpp_class_get_field_from_name(rpmClass, "s_currentPipeline");
+  if (!pipelineField)
+    pipelineField = FindFieldByName(rpmClass, "s_currentPipeline");
+  if (!pipelineField)
+    return false;
+
+  uintptr_t pipelinePtr = 0;
+  il2cpp_field_static_get_value(pipelineField, &pipelinePtr);
+  if (!pipelinePtr)
+    return false;
+
+  void *pipelineClass = GetObjectClass(pipelinePtr);
+  if (!pipelineClass)
+    return false;
+
+  void *settingsField = FindFieldByName(pipelineClass, "settingParameters");
+  if (!settingsField)
+    return false;
+
+  size_t settingsOffset = il2cpp_field_get_offset(settingsField);
+  uintptr_t settingsPtr = 0;
+  if (!SafeRead(pipelinePtr + settingsOffset, &settingsPtr) || !settingsPtr)
+    return false;
+
+  void *settingsClass = GetObjectClass(settingsPtr);
+  if (!settingsClass)
+    return false;
+
+  void *targetField = FindFieldByName(settingsClass, settingName);
+  if (!targetField)
+    return false;
+
+  size_t targetOffset = il2cpp_field_get_offset(targetField);
+  uintptr_t settingParamPtr = 0;
+  if (!SafeRead(settingsPtr + targetOffset, &settingParamPtr) || !settingParamPtr)
+    return false;
+
+  void *paramClass = GetObjectClass(settingParamPtr);
+  if (!paramClass)
+    return false;
+
+  void *paramValueField = FindFieldByName(paramClass, "paramValue");
+  if (!paramValueField)
+    return false;
+
+  size_t paramOffset = il2cpp_field_get_offset(paramValueField);
+  uintptr_t valueAddr = settingParamPtr + paramOffset;
+
+  uint8_t oldRawValue = 0;
+  SafeRead(valueAddr, &oldRawValue);
+  uint8_t newRawValue = value != 0 ? 1 : 0;
+
+  if (writeInfo) {
+    writeInfo->ownerPtr = settingsPtr;
+    writeInfo->settingParamPtr = settingParamPtr;
+    writeInfo->valueAddr = valueAddr;
+    writeInfo->targetOffset = targetOffset;
+    writeInfo->valueOffset = paramOffset;
+    writeInfo->oldValue = oldRawValue ? 1 : 0;
+    writeInfo->newValue = newRawValue ? 1 : 0;
+    writeInfo->changed = oldRawValue != newRawValue;
+  }
+
+  return SafeWrite(valueAddr, newRawValue);
+}
+
 bool SetShadowManagerValue(const char *fieldName, int value,
                            IntWriteInfo *writeInfo = nullptr) {
   if (writeInfo)
@@ -929,6 +1013,26 @@ bool ApplyManagedShadowSettings(const GfxConfigSnapshot *before = nullptr) {
                         "HGShadowManager.m_csmShadowSampleMode", ok, info);
   } else if (logSample) {
     LogSettingDisabled("CSMShadowSampleMode");
+  }
+
+  bool charSampleActive = g_charShadowSampleMode >= 0;
+  bool oldCharSampleActive =
+      before ? before->charShadowSampleMode >= 0 : false;
+  int oldCharSampleValue = before ? before->charShadowSampleMode : -1;
+  bool logCharSample =
+      ShouldLogIntApply(g_charShadowSampleMode, oldCharSampleValue,
+                        charSampleActive, oldCharSampleActive, before);
+  if (charSampleActive) {
+    IntWriteInfo info;
+    bool ok = SetShadowManagerValue("m_CharacterShadowSampleMode",
+                                    g_charShadowSampleMode, &info);
+    success &= ok;
+    if (logCharSample)
+      LogIntWriteResult("CharacterShadowSampleMode",
+                        "HGShadowManager.m_CharacterShadowSampleMode", ok,
+                        info);
+  } else if (logCharSample) {
+    LogSettingDisabled("CharacterShadowSampleMode");
   }
 
   return success;
@@ -1170,6 +1274,47 @@ bool ApplyGraphicsSettings(const GfxConfigSnapshot *before = nullptr) {
                      "ssrV2Upsample", ssrUpsample, oldSsrUpsample);
 
 #undef APPLY_GRAPHICS_INT
+
+  bool maskActive = g_screenSpaceShadowMask >= 0;
+  bool oldMaskActive = before ? before->screenSpaceShadowMask >= 0 : false;
+  int maskValue = g_screenSpaceShadowMask != 0 ? 1 : 0;
+  int oldMaskValue = before && before->screenSpaceShadowMask >= 0
+                         ? (before->screenSpaceShadowMask != 0 ? 1 : 0)
+                         : -1;
+  bool logMask = ShouldLogIntApply(maskValue, oldMaskValue, maskActive,
+                                   oldMaskActive, before);
+  if (maskActive) {
+    IntWriteInfo info;
+    bool ok = SetSettingParameterBoolValue("enableScreenSpaceShadowMask",
+                                           maskValue, &info);
+    success &= ok;
+    if (logMask)
+      LogIntWriteResult(
+          "ScreenSpaceShadowMask",
+          "HGSettingParameters.enableScreenSpaceShadowMask.paramValue", ok,
+          info);
+  } else if (logMask) {
+    LogSettingDisabled("ScreenSpaceShadowMask");
+  }
+
+  bool renderScaleActive = g_renderScale >= 0.0f;
+  bool oldRenderScaleActive = before ? before->renderScale >= 0.0f : false;
+  float oldRenderScaleValue = before ? before->renderScale : -1.0f;
+  bool logRenderScale =
+      ShouldLogFloatApply(g_renderScale, oldRenderScaleValue,
+                          renderScaleActive, oldRenderScaleActive, before);
+  if (renderScaleActive) {
+    FloatWriteInfo info;
+    bool ok = SetSettingParameterFloatValue("renderingScale", g_renderScale,
+                                            &info);
+    success &= ok;
+    if (logRenderScale)
+      LogFloatWriteResult(
+          "RenderScale", "HGSettingParameters.renderingScale.paramValue", ok,
+          info);
+  } else if (logRenderScale) {
+    LogSettingDisabled("RenderScale");
+  }
 
   bool anisoActive = g_anisoLevel > 0;
   bool oldAnisoActive = before ? before->anisoLevel > 0 : false;
@@ -1600,10 +1745,20 @@ void LogConfigSelection(const char *reason, const GfxConfigSnapshot *before) {
                       g_asmShadowRes >= 0,
                       before ? before->asmShadowRes >= 0 : false,
                       before, &logged);
+  LogConfigIntSetting("ScreenSpaceShadowMask", g_screenSpaceShadowMask,
+                      before ? before->screenSpaceShadowMask : -1,
+                      g_screenSpaceShadowMask >= 0,
+                      before ? before->screenSpaceShadowMask >= 0 : false,
+                      before, &logged);
   LogConfigIntSetting("CSMShadowSampleMode", g_csmShadowSampleMode,
                       before ? before->csmShadowSampleMode : -1,
                       g_csmShadowSampleMode >= 0,
                       before ? before->csmShadowSampleMode >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("CharacterShadowSampleMode", g_charShadowSampleMode,
+                      before ? before->charShadowSampleMode : -1,
+                      g_charShadowSampleMode >= 0,
+                      before ? before->charShadowSampleMode >= 0 : false,
                       before, &logged);
   LogConfigFloatSetting("CSMDepthBias", g_csmDepthBias,
                         before ? before->csmDepthBias : -1.0f,
@@ -1670,6 +1825,11 @@ void LogConfigSelection(const char *reason, const GfxConfigSnapshot *before) {
                       g_ssrUpsampling >= 0,
                       before ? before->ssrUpsampling >= 0 : false,
                       before, &logged);
+  LogConfigFloatSetting("RenderScale", g_renderScale,
+                        before ? before->renderScale : -1.0f,
+                        g_renderScale >= 0.0f,
+                        before ? before->renderScale >= 0.0f : false,
+                        before, &logged);
   LogConfigIntSetting("AnisoLevel", g_anisoLevel,
                       before ? before->anisoLevel : -1,
                       g_anisoLevel > 0,
