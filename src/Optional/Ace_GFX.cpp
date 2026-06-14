@@ -8,6 +8,7 @@ extern "C" __declspec(dllexport) void Ace_GFX_Dummy() {}
 
 #define INIT_DELAY_MS 10000
 #define APPLY_INTERVAL_MS 5000
+#define DEFAULT_LIVE_EDIT_INTERVAL_MS 1000
 
 #define IL2CPP_OBJECT_HEADER_SIZE 0x10
 
@@ -107,8 +108,12 @@ static int g_ssrUpsampling = -1;
 static float g_renderScale = -1.0f;
 static int g_anisoLevel = -1;
 static float g_sharpening = -1.0f;
+static int g_liveEdit = 0;
+static int g_liveEditIntervalMs = DEFAULT_LIVE_EDIT_INTERVAL_MS;
 
 static char g_iniPath[MAX_PATH] = {0};
+static FILETIME g_configLastWriteTime = {0};
+static bool g_configLastWriteTimeValid = false;
 
 struct RenderHookOffsets {
   size_t renderParamsGtaoPtr;
@@ -789,7 +794,7 @@ int GetPrivateProfileBool(const char *section, const char *key, int defaultVal,
   return GetPrivateProfileIntA(section, key, defaultVal, iniPath);
 }
 
-void LoadConfig() {
+void UpdateIniPath() {
   char exePath[MAX_PATH];
   GetModuleFileNameA(NULL, exePath, MAX_PATH);
   std::string dir(exePath);
@@ -798,10 +803,53 @@ void LoadConfig() {
     dir = dir.substr(0, lastSlash + 1);
   std::string iniPath = dir + "EndfieldGFX.ini";
   strncpy(g_iniPath, iniPath.c_str(), MAX_PATH - 1);
+  g_iniPath[MAX_PATH - 1] = '\0';
+}
+
+bool RefreshConfigLastWriteTime() {
+  if (g_iniPath[0] == '\0')
+    UpdateIniPath();
+
+  WIN32_FILE_ATTRIBUTE_DATA data = {};
+  if (!GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &data)) {
+    g_configLastWriteTimeValid = false;
+    return false;
+  }
+
+  g_configLastWriteTime = data.ftLastWriteTime;
+  g_configLastWriteTimeValid = true;
+  return true;
+}
+
+bool HasConfigChangedOnDisk() {
+  if (g_iniPath[0] == '\0')
+    UpdateIniPath();
+
+  WIN32_FILE_ATTRIBUTE_DATA data = {};
+  if (!GetFileAttributesExA(g_iniPath, GetFileExInfoStandard, &data))
+    return false;
+
+  if (!g_configLastWriteTimeValid)
+    return true;
+
+  return CompareFileTime(&data.ftLastWriteTime, &g_configLastWriteTime) != 0;
+}
+
+void LoadConfig() {
+  UpdateIniPath();
 
   DWORD attrib = GetFileAttributesA(g_iniPath);
   if (attrib == INVALID_FILE_ATTRIBUTES)
     return;
+
+  g_liveEdit = GetPrivateProfileBool("Graphics", "LiveEdit", 0, g_iniPath);
+  g_liveEditIntervalMs = GetPrivateProfileIntA(
+      "Graphics", "LiveEditIntervalMs", DEFAULT_LIVE_EDIT_INTERVAL_MS,
+      g_iniPath);
+  if (g_liveEditIntervalMs < 250)
+    g_liveEditIntervalMs = 250;
+  if (g_liveEditIntervalMs > 10000)
+    g_liveEditIntervalMs = 10000;
 
   g_gtaoScale = GetPrivateProfileFloat("Graphics", "GTAORes", -1.0f, g_iniPath);
   g_csmShadowSoftness = GetPrivateProfileFloat("Graphics", "CSMShadowSoftness", -1.0f, g_iniPath);
@@ -1227,12 +1275,32 @@ bool TryDirectPatch() {
 
 void ApplyEnhancements() {
   LoadConfig();
+  RefreshConfigLastWriteTime();
   GetScreenRes();
   TryDirectPatch();
 }
 
+bool ApplyConfigBackedSettings() {
+  bool allSuccess = true;
+
+  if (ApplyManagedShadowSettings())
+    g_shadowPatched = true;
+  else
+    allSuccess = false;
+
+  allSuccess &= ApplyGraphicsSettings();
+  allSuccess &= ApplyAASettings();
+
+  return allSuccess;
+}
+
 DWORD WINAPI EnforcerThread(LPVOID) {
+  Il2CppDomain domain = il2cpp_domain_get();
+  if (domain && il2cpp_thread_attach)
+    il2cpp_thread_attach(domain);
+
   static bool initialSettingsApplied = false;
+  DWORD lastLiveEditPollTick = GetTickCount();
   int tick = 0;
 
   while (true) {
@@ -1243,18 +1311,22 @@ DWORD WINAPI EnforcerThread(LPVOID) {
     tick++;
 
     if (!initialSettingsApplied && tick >= 6) {
-      bool allSuccess = true;
-
-      if (ApplyManagedShadowSettings())
-        g_shadowPatched = true;
-      else
-        allSuccess = false;
-
-      ApplyGraphicsSettings();
-      ApplyAASettings();
-
-      if (allSuccess)
+      if (ApplyConfigBackedSettings())
         initialSettingsApplied = true;
+    }
+
+    if (g_liveEdit) {
+      DWORD now = GetTickCount();
+      if ((DWORD)(now - lastLiveEditPollTick) >=
+          (DWORD)g_liveEditIntervalMs) {
+        lastLiveEditPollTick = now;
+        if (HasConfigChangedOnDisk()) {
+          LoadConfig();
+          RefreshConfigLastWriteTime();
+          if (ApplyConfigBackedSettings())
+            initialSettingsApplied = true;
+        }
+      }
     }
 
     if (initialSettingsApplied && g_aaMode == 0) {
