@@ -9,33 +9,7 @@ extern "C" __declspec(dllexport) void Ace_GFX_Dummy() {}
 #define INIT_DELAY_MS 10000
 #define APPLY_INTERVAL_MS 5000
 
-#define RENDER_PARAMS_GTAO_PTR 0x248
-#define RENDER_PARAMS_SETTING_PARAMS_PTR 0x20
-#define GTAO_ENABLE_AO 0x0
-#define GTAO_SCREEN_WIDTH 0x4
-#define GTAO_SCREEN_HEIGHT 0x8
-#define GTAO_QUALITY_LEVEL 0xC
-#define SETTING_ENABLE_SCREEN_SPACE_SHADOW_MASK 0x9C
-#define SETTING_CSM_SHADOW_MAP_TILE_RES 0xA0
-#define SETTING_CHARACTER_SHADOW_MAP_RES 0x100
-#define SETTING_PUNCTUAL_LIGHT_TILE_MAX_SIZE 0x118
-#define SETTING_ASM_SHADOW_MAP_TILE_RES 0x12C
-#define SETTING_SSR_ENABLE 0x184
-#define SETTING_SSR_RAY_MARCHING_SAMPLE_COUNT 0x188
-#define SETTING_SSR_V2 0x18C
-#define SETTING_SSR_V2_UPSAMPLE 0x18D
-#define SETTING_RENDERING_SCALE 0x158
-#define RENDER_PARAMS_SCENE_RT_SIZE 0x98
-#define RENDER_PARAMS_FINAL_RT_SIZE 0xB0
-#define BEFORE_CULLING_SHADOW_CONFIG_PTR 0x38
-#define SHADOW_CONFIG_CSM_DEPTH_BIAS 0x00
-#define SHADOW_CONFIG_CSM_NORMAL_BIAS 0x04
-#define SHADOW_CONFIG_CSM_INTENSITY 0x08
-#define SHADOW_CONFIG_CSM_SOFTNESS 0x18
-#define SHADOW_CONFIG_CONTACT_INTENSITY 0x24
-#define SHADOW_CONFIG_CONTACT_SURFACE_THICKNESS 0x28
-#define SHADOW_CONFIG_CONTACT_BILINEAR 0x2C
-#define SHADOW_CONFIG_CONTACT_CONTRACT 0x30
+#define IL2CPP_OBJECT_HEADER_SIZE 0x10
 
 typedef void *Il2CppDomain;
 typedef void *Il2CppAssembly;
@@ -136,6 +110,24 @@ static float g_sharpening = -1.0f;
 
 static char g_iniPath[MAX_PATH] = {0};
 
+struct RenderHookOffsets {
+  size_t renderParamsGtaoPtr;
+  size_t gtaoScreenWidth;
+  size_t gtaoScreenHeight;
+  size_t beforeCullingShadowConfigPtr;
+  size_t shadowCsmDepthBias;
+  size_t shadowCsmNormalBias;
+  size_t shadowCsmIntensity;
+  size_t shadowCsmSoftness;
+  size_t shadowContactIntensity;
+  size_t shadowContactThickness;
+  size_t shadowContactBilinear;
+  size_t shadowContactContract;
+};
+
+static RenderHookOffsets g_renderHookOffsets = {};
+static bool g_renderHookOffsetsResolved = false;
+
 typedef void *(*ConvertSettingParamsToCpp_t)(void *settingParameters);
 static ConvertSettingParamsToCpp_t g_TrampolineFunc = nullptr;
 static void *g_pTrampoline = nullptr;
@@ -205,6 +197,103 @@ void *FindFieldByName(void *klass, const char *fieldName) {
     }
   }
   return nullptr;
+}
+
+Il2CppClass FindHGGraphicsClass(Il2CppImage image, const char *className) {
+  if (!image || !className || !il2cpp_class_from_name)
+    return nullptr;
+
+  Il2CppClass klass = il2cpp_class_from_name(
+      image, "UnityEngine.HyperGryphEngineCode", className);
+  if (!klass)
+    klass = il2cpp_class_from_name(image, "", className);
+  return klass;
+}
+
+bool ResolveCppFieldOffset(Il2CppClass klass, const char *fieldName,
+                           size_t *outOffset) {
+  if (!klass || !fieldName || !outOffset || !il2cpp_field_get_offset)
+    return false;
+
+  void *field = FindFieldByName(klass, fieldName);
+  if (!field)
+    return false;
+
+  size_t il2cppOffset = il2cpp_field_get_offset(field);
+  if (il2cppOffset < IL2CPP_OBJECT_HEADER_SIZE)
+    return false;
+
+  *outOffset = il2cppOffset - IL2CPP_OBJECT_HEADER_SIZE;
+  return true;
+}
+
+bool ResolveCppFieldOffsetAny(Il2CppClass klass, const char *const *fieldNames,
+                              size_t fieldNameCount, size_t *outOffset) {
+  for (size_t i = 0; i < fieldNameCount; i++) {
+    if (ResolveCppFieldOffset(klass, fieldNames[i], outOffset))
+      return true;
+  }
+  return false;
+}
+
+bool ResolveRenderHookOffsets() {
+  if (g_renderHookOffsetsResolved)
+    return true;
+
+  Il2CppImage graphicsImage = FindImage("UnityEngine.HGGraphicsCPPModule");
+  if (!graphicsImage)
+    return false;
+
+  Il2CppClass renderParamsClass =
+      FindHGGraphicsClass(graphicsImage, "HGRenderPathParamsCPP");
+  Il2CppClass beforeCullingClass =
+      FindHGGraphicsClass(graphicsImage, "HGRenderPathBeforeCullingParamsCPP");
+  Il2CppClass gtaoClass = FindHGGraphicsClass(
+      graphicsImage, "HGGTAmbientOcclusionSettingParameters");
+  Il2CppClass shadowConfigClass =
+      FindHGGraphicsClass(graphicsImage, "HGShadowConfigCPP");
+
+  RenderHookOffsets offsets = {};
+  bool success = true;
+  const char *gtaoFieldNames[] = {"gtaoSettingParameters", "gtao"};
+  const char *softnessFieldNames[] = {"csmShadowSoftness", "csmSoftness"};
+  const char *thicknessFieldNames[] = {"contactShadowSurfaceThickness",
+                                       "contactShadowThickness"};
+  const char *bilinearFieldNames[] = {"contactShadowBilinearThreshold",
+                                      "contactShadowBilinear"};
+
+  success &= ResolveCppFieldOffsetAny(renderParamsClass, gtaoFieldNames, 2,
+                                      &offsets.renderParamsGtaoPtr);
+  success &= ResolveCppFieldOffset(
+      beforeCullingClass, "shadowConfig",
+      &offsets.beforeCullingShadowConfigPtr);
+  success &= ResolveCppFieldOffset(gtaoClass, "screenWidth",
+                                   &offsets.gtaoScreenWidth);
+  success &= ResolveCppFieldOffset(gtaoClass, "screenHeight",
+                                   &offsets.gtaoScreenHeight);
+  success &= ResolveCppFieldOffset(shadowConfigClass, "csmDepthBias",
+                                   &offsets.shadowCsmDepthBias);
+  success &= ResolveCppFieldOffset(shadowConfigClass, "csmNormalBias",
+                                   &offsets.shadowCsmNormalBias);
+  success &= ResolveCppFieldOffset(shadowConfigClass, "csmIntensity",
+                                   &offsets.shadowCsmIntensity);
+  success &= ResolveCppFieldOffsetAny(shadowConfigClass, softnessFieldNames, 2,
+                                      &offsets.shadowCsmSoftness);
+  success &= ResolveCppFieldOffset(shadowConfigClass, "contactShadowIntensity",
+                                   &offsets.shadowContactIntensity);
+  success &= ResolveCppFieldOffsetAny(shadowConfigClass, thicknessFieldNames, 2,
+                                      &offsets.shadowContactThickness);
+  success &= ResolveCppFieldOffsetAny(shadowConfigClass, bilinearFieldNames, 2,
+                                      &offsets.shadowContactBilinear);
+  success &= ResolveCppFieldOffset(shadowConfigClass, "contactShadowContract",
+                                   &offsets.shadowContactContract);
+
+  if (!success)
+    return false;
+
+  g_renderHookOffsets = offsets;
+  g_renderHookOffsetsResolved = true;
+  return true;
 }
 
 void *GetObjectClass(uintptr_t objAddr) {
@@ -305,8 +394,9 @@ bool SetSettingParameterValue(const char *settingName, int value) {
   return true;
 }
 
-bool SetShadowManagerValue(const char* fieldName, size_t fieldOffset, int value) {
-  if (!il2cpp_class_get_field_from_name || !il2cpp_field_static_get_value)
+bool SetShadowManagerValue(const char *fieldName, int value) {
+  if (!fieldName || !il2cpp_class_get_field_from_name ||
+      !il2cpp_field_static_get_value || !il2cpp_field_get_offset)
     return false;
 
   Il2CppImage coreImage = FindImage("UnityEngine.CoreModule");
@@ -329,20 +419,34 @@ bool SetShadowManagerValue(const char* fieldName, size_t fieldOffset, int value)
   if (!pipelinePtr)
     return false;
 
-  const size_t SHADOW_MANAGER_OFFSET = 0x728;
+  void *pipelineClass = GetObjectClass(pipelinePtr);
+  if (!pipelineClass)
+    return false;
+
+  void *shadowManagerField = FindFieldByName(pipelineClass, "shadowManager");
+  if (!shadowManagerField)
+    shadowManagerField = FindFieldByName(pipelineClass, "m_shadowManager");
+  if (!shadowManagerField)
+    shadowManagerField = FindFieldByName(pipelineClass, "m_ShadowManager");
+  if (!shadowManagerField)
+    return false;
+
+  size_t shadowManagerOffset = il2cpp_field_get_offset(shadowManagerField);
   uintptr_t shadowManagerPtr = 0;
-  if (!SafeRead(pipelinePtr + SHADOW_MANAGER_OFFSET, &shadowManagerPtr) || !shadowManagerPtr)
+  if (!SafeRead(pipelinePtr + shadowManagerOffset, &shadowManagerPtr) ||
+      !shadowManagerPtr)
     return false;
 
-  uintptr_t valueAddr = shadowManagerPtr + fieldOffset;
-
-  int oldValue = 0;
-  SafeRead(valueAddr, &oldValue);
-
-  if (!SafeWrite(valueAddr, value))
+  void *shadowManagerClass = GetObjectClass(shadowManagerPtr);
+  if (!shadowManagerClass)
     return false;
 
-  return true;
+  void *targetField = FindFieldByName(shadowManagerClass, fieldName);
+  if (!targetField)
+    return false;
+
+  size_t targetOffset = il2cpp_field_get_offset(targetField);
+  return SafeWrite(shadowManagerPtr + targetOffset, value);
 }
 
 bool ApplyManagedShadowSettings() {
@@ -358,7 +462,8 @@ bool ApplyManagedShadowSettings() {
     success &= SetSettingParameterValue("asmShadowMapTileResolution", g_asmShadowRes);
 
   if (g_csmShadowSampleMode >= 0)
-    success &= SetShadowManagerValue("m_csmShadowSampleMode", 0x198, g_csmShadowSampleMode);
+    success &= SetShadowManagerValue("m_csmShadowSampleMode",
+                                     g_csmShadowSampleMode);
 
   return success;
 }
@@ -922,13 +1027,16 @@ void HookedRenderPath(int64_t _ptr, void *renderPathParams,
       uint8_t *base = (uint8_t *)renderPathParams;
 
       if (g_gtaoScale >= 0) {
-        void **gtaoPtrAddr = (void **)(base + RENDER_PARAMS_GTAO_PTR);
+        void **gtaoPtrAddr =
+            (void **)(base + g_renderHookOffsets.renderParamsGtaoPtr);
         void *gtaoPtr = *gtaoPtrAddr;
 
         if (gtaoPtr) {
           uint8_t *gtaoSettings = (uint8_t *)gtaoPtr;
-          int32_t *pWidth = (int32_t *)(gtaoSettings + GTAO_SCREEN_WIDTH);
-          int32_t *pHeight = (int32_t *)(gtaoSettings + GTAO_SCREEN_HEIGHT);
+          int32_t *pWidth =
+              (int32_t *)(gtaoSettings + g_renderHookOffsets.gtaoScreenWidth);
+          int32_t *pHeight =
+              (int32_t *)(gtaoSettings + g_renderHookOffsets.gtaoScreenHeight);
 
           int32_t oldWidth = *pWidth;
           int32_t oldHeight = *pHeight;
@@ -952,43 +1060,53 @@ void HookedRenderPath(int64_t _ptr, void *renderPathParams,
   if (beforeCullingParams) {
     __try {
       uintptr_t shadowConfigPtr = 0;
-      if (!SafeRead((uintptr_t)beforeCullingParams + BEFORE_CULLING_SHADOW_CONFIG_PTR, &shadowConfigPtr))
+      if (!SafeRead((uintptr_t)beforeCullingParams +
+                        g_renderHookOffsets.beforeCullingShadowConfigPtr,
+                    &shadowConfigPtr))
         goto call_original;
       if (!shadowConfigPtr)
         goto call_original;
 
       float currentSoftness = 0.0f;
-      if (!SafeRead(shadowConfigPtr + SHADOW_CONFIG_CSM_SOFTNESS, &currentSoftness))
+      if (!SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmSoftness,
+                    &currentSoftness))
         goto call_original;
 
       float curDepthBias = 0, curNormalBias = 0, curIntensity = 0;
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CSM_DEPTH_BIAS, &curDepthBias);
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CSM_NORMAL_BIAS, &curNormalBias);
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CSM_INTENSITY, &curIntensity);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmDepthBias,
+               &curDepthBias);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmNormalBias,
+               &curNormalBias);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmIntensity,
+               &curIntensity);
 
       float contactIntensity = 0, contactThickness = 0, contactBilinear = 0, contactContract = 0;
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CONTACT_INTENSITY, &contactIntensity);
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CONTACT_SURFACE_THICKNESS, &contactThickness);
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CONTACT_BILINEAR, &contactBilinear);
-      SafeRead(shadowConfigPtr + SHADOW_CONFIG_CONTACT_CONTRACT, &contactContract);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowContactIntensity,
+               &contactIntensity);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowContactThickness,
+               &contactThickness);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowContactBilinear,
+               &contactBilinear);
+      SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowContactContract,
+               &contactContract);
 
       if (g_csmShadowSoftness >= 0 && currentSoftness != g_csmShadowSoftness)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CSM_SOFTNESS, g_csmShadowSoftness);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmSoftness, g_csmShadowSoftness);
       if (g_csmDepthBias >= 0 && curDepthBias != g_csmDepthBias)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CSM_DEPTH_BIAS, g_csmDepthBias);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmDepthBias, g_csmDepthBias);
       if (g_csmNormalBias >= 0 && curNormalBias != g_csmNormalBias)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CSM_NORMAL_BIAS, g_csmNormalBias);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmNormalBias, g_csmNormalBias);
       if (g_csmIntensity >= 0 && curIntensity != g_csmIntensity)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CSM_INTENSITY, g_csmIntensity);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmIntensity, g_csmIntensity);
 
       if (g_contactShadowIntensity >= 0 && contactIntensity != g_contactShadowIntensity)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CONTACT_INTENSITY, g_contactShadowIntensity);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactIntensity, g_contactShadowIntensity);
       if (g_contactShadowThickness >= 0 && contactThickness != g_contactShadowThickness)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CONTACT_SURFACE_THICKNESS, g_contactShadowThickness);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactThickness, g_contactShadowThickness);
       if (g_contactShadowBilinear >= 0 && contactBilinear != g_contactShadowBilinear)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CONTACT_BILINEAR, g_contactShadowBilinear);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactBilinear, g_contactShadowBilinear);
       if (g_contactShadowContract >= 0 && contactContract != g_contactShadowContract)
-        SafeWrite(shadowConfigPtr + SHADOW_CONFIG_CONTACT_CONTRACT, g_contactShadowContract);
+        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactContract, g_contactShadowContract);
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
   }
@@ -1082,6 +1200,9 @@ bool InstallHookWithTrampoline(void *target) {
 }
 
 bool TryDirectPatch() {
+  if (!ResolveRenderHookOffsets())
+    return false;
+
   Il2CppImage graphicsImage = FindImage("UnityEngine.HGGraphicsCPPModule");
   if (!graphicsImage)
     return false;
