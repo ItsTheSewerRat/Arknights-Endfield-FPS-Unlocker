@@ -1,4 +1,5 @@
 #define _CRT_SECURE_NO_WARNINGS
+#include <cstdarg>
 #include <cstdint>
 #include <stdio.h>
 #include <string>
@@ -78,6 +79,7 @@ Il2CppImage FindImage(const char *name);
 void *GetMethodPointer(Il2CppMethodInfo mi);
 
 static HMODULE g_hGameAssembly = nullptr;
+static HMODULE g_hSelfModule = nullptr;
 static bool g_initialized = false;
 static int g_screenWidth = 0, g_screenHeight = 0;
 static bool g_gtaoPatched = false;
@@ -108,10 +110,12 @@ static int g_ssrUpsampling = -1;
 static float g_renderScale = -1.0f;
 static int g_anisoLevel = -1;
 static float g_sharpening = -1.0f;
+static int g_logging = 1;
 static int g_liveEdit = 0;
 static int g_liveEditIntervalMs = DEFAULT_LIVE_EDIT_INTERVAL_MS;
 
 static char g_iniPath[MAX_PATH] = {0};
+static char g_logPath[MAX_PATH] = {0};
 static FILETIME g_configLastWriteTime = {0};
 static bool g_configLastWriteTimeValid = false;
 
@@ -147,13 +151,99 @@ bool IsMainGameProcess() {
          strstr(exePath, "Endfield.exe") != nullptr;
 }
 
+std::string GetGameDirectory() {
+  char exePath[MAX_PATH] = {0};
+  GetModuleFileNameA(NULL, exePath, MAX_PATH);
+  std::string dir(exePath);
+  size_t lastSlash = dir.rfind('\\');
+  if (lastSlash != std::string::npos)
+    dir = dir.substr(0, lastSlash + 1);
+  return dir;
+}
+
+std::string GetExecutablePath() {
+  char exePath[MAX_PATH] = {0};
+  GetModuleFileNameA(NULL, exePath, MAX_PATH);
+  return std::string(exePath);
+}
+
+std::string GetSelfModulePath() {
+  char modulePath[MAX_PATH] = {0};
+  GetModuleFileNameA(g_hSelfModule, modulePath, MAX_PATH);
+  return std::string(modulePath);
+}
+
+void InitLogPath() {
+  if (g_logPath[0] != '\0')
+    return;
+
+  std::string logPath = GetGameDirectory() + "EndfieldGFX.log";
+  strncpy(g_logPath, logPath.c_str(), MAX_PATH - 1);
+  g_logPath[MAX_PATH - 1] = '\0';
+}
+
+void ResetLogFile() {
+  if (!g_logging)
+    return;
+
+  InitLogPath();
+  FILE *file = fopen(g_logPath, "w");
+  if (!file)
+    return;
+
+  SYSTEMTIME st = {};
+  GetLocalTime(&st);
+  fprintf(file,
+          "=== EndfieldGFX.log started %04u-%02u-%02u %02u:%02u:%02u ===\n",
+          st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+  fprintf(file, "ProcessId=%lu ThreadId=%lu\n", GetCurrentProcessId(),
+          GetCurrentThreadId());
+  fprintf(file, "Executable=%s\n", GetExecutablePath().c_str());
+  fprintf(file, "Module=%s\n", GetSelfModulePath().c_str());
+  fclose(file);
+}
+
 void CreateDebugConsole() {}
-void Log(const char *fmt, ...) {}
-void LogColored(WORD color, const char *fmt, ...) {}
-#define LOG_SUCCESS(fmt, ...) do {} while(0)
-#define LOG_WARNING(fmt, ...) do {} while(0)
-#define LOG_ERROR(fmt, ...) do {} while(0)
-#define LOG_INFO(fmt, ...) do {} while(0)
+
+void Log(const char *fmt, ...) {
+  if (!g_logging || !fmt)
+    return;
+
+  InitLogPath();
+  FILE *file = fopen(g_logPath, "a");
+  if (!file)
+    return;
+
+  SYSTEMTIME st = {};
+  GetLocalTime(&st);
+  fprintf(file, "[%02u:%02u:%02u] ", st.wHour, st.wMinute, st.wSecond);
+
+  va_list args;
+  va_start(args, fmt);
+  vfprintf(file, fmt, args);
+  va_end(args);
+
+  fputc('\n', file);
+  fclose(file);
+}
+
+void LogColored(WORD, const char *fmt, ...) {
+  if (!g_logging || !fmt)
+    return;
+
+  char buffer[1024];
+  va_list args;
+  va_start(args, fmt);
+  vsnprintf(buffer, sizeof(buffer), fmt, args);
+  va_end(args);
+  buffer[sizeof(buffer) - 1] = '\0';
+  Log("%s", buffer);
+}
+
+#define LOG_SUCCESS(...) do { Log("[OK] " __VA_ARGS__); } while (0)
+#define LOG_WARNING(...) do { Log("[WARN] " __VA_ARGS__); } while (0)
+#define LOG_ERROR(...) do { Log("[ERROR] " __VA_ARGS__); } while (0)
+#define LOG_INFO(...) do { Log("[INFO] " __VA_ARGS__); } while (0)
 template <typename T> inline bool SafeRead(uintptr_t addr, T *out) {
   __try {
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF)
@@ -246,8 +336,10 @@ bool ResolveRenderHookOffsets() {
     return true;
 
   Il2CppImage graphicsImage = FindImage("UnityEngine.HGGraphicsCPPModule");
-  if (!graphicsImage)
+  if (!graphicsImage) {
+    Log("Render hook offsets: UnityEngine.HGGraphicsCPPModule not loaded");
     return false;
+  }
 
   Il2CppClass renderParamsClass =
       FindHGGraphicsClass(graphicsImage, "HGRenderPathParamsCPP");
@@ -293,11 +385,16 @@ bool ResolveRenderHookOffsets() {
   success &= ResolveCppFieldOffset(shadowConfigClass, "contactShadowContract",
                                    &offsets.shadowContactContract);
 
-  if (!success)
+  if (!success) {
+    Log("Render hook offsets: failed to resolve required metadata fields");
     return false;
+  }
 
   g_renderHookOffsets = offsets;
   g_renderHookOffsetsResolved = true;
+  Log("Render hook offsets: GTAO=0x%zX width=0x%zX height=0x%zX shadowConfig=0x%zX",
+      offsets.renderParamsGtaoPtr, offsets.gtaoScreenWidth,
+      offsets.gtaoScreenHeight, offsets.beforeCullingShadowConfigPtr);
   return true;
 }
 
@@ -842,6 +939,7 @@ void LoadConfig() {
   if (attrib == INVALID_FILE_ATTRIBUTES)
     return;
 
+  g_logging = GetPrivateProfileBool("Graphics", "Logging", 1, g_iniPath);
   g_liveEdit = GetPrivateProfileBool("Graphics", "LiveEdit", 0, g_iniPath);
   g_liveEditIntervalMs = GetPrivateProfileIntA(
       "Graphics", "LiveEditIntervalMs", DEFAULT_LIVE_EDIT_INTERVAL_MS,
@@ -890,6 +988,20 @@ void LoadConfig() {
     g_anisoLevel = -g_anisoLevel;
 
   g_sharpening = GetPrivateProfileFloat("Graphics", "Sharpening", -1.0f, g_iniPath);
+}
+
+void LogLoadedConfig() {
+  Log("Config: path=%s Logging=%d LiveEdit=%d LiveEditIntervalMs=%d",
+      g_iniPath, g_logging, g_liveEdit, g_liveEditIntervalMs);
+  Log("Config graphics: GTAORes=%.3f CSMShadowSoftness=%.3f CSMShadowRes=%d CharacterShadowRes=%d PunctualLightShadowRes=%d ASMShadowRes=%d",
+      g_gtaoScale, g_csmShadowSoftness, g_csmShadowRes, g_charShadowRes,
+      g_punctualShadowRes, g_asmShadowRes);
+  Log("Config shadows: ScreenSpaceShadowMask=%d CSMShadowSampleMode=%d CharacterShadowSampleMode=%d CSMDepthBias=%.3f CSMNormalBias=%.3f CSMIntensity=%.3f",
+      g_screenSpaceShadowMask, g_csmShadowSampleMode, g_charShadowSampleMode,
+      g_csmDepthBias, g_csmNormalBias, g_csmIntensity);
+  Log("Config post: AA=%d SMAA=%d SSRQuality=%d SSREnable=%d SSRSampleCount=%d SSRUpsampling=%d RenderScale=%.3f AnisoLevel=%d Sharpening=%.3f",
+      g_aaMode, g_smaaQuality, g_ssrQuality, g_ssrEnable, g_ssrSampleCount,
+      g_ssrUpsampling, g_renderScale, g_anisoLevel, g_sharpening);
 }
 
 bool ResolveIL2CppAPI() {
@@ -1248,12 +1360,16 @@ bool InstallHookWithTrampoline(void *target) {
 }
 
 bool TryDirectPatch() {
-  if (!ResolveRenderHookOffsets())
+  if (!ResolveRenderHookOffsets()) {
+    Log("HGRenderPath_Render hook: skipped because metadata offsets failed");
     return false;
+  }
 
   Il2CppImage graphicsImage = FindImage("UnityEngine.HGGraphicsCPPModule");
-  if (!graphicsImage)
+  if (!graphicsImage) {
+    Log("HGRenderPath_Render hook: graphics image not found");
     return false;
+  }
 
   Il2CppClass renderGraphClass = il2cpp_class_from_name(
       graphicsImage, "UnityEngine.HyperGryphEngineCode", "HGRenderGraphCPP");
@@ -1265,11 +1381,16 @@ bool TryDirectPatch() {
         renderGraphClass, "HGRenderPath_Render", 6);
     if (renderMethod) {
       g_ConvertMethodPtr = GetMethodPointer(renderMethod);
-      if (g_ConvertMethodPtr)
-        return InstallHookWithTrampoline(g_ConvertMethodPtr);
+      if (g_ConvertMethodPtr) {
+        bool installed = InstallHookWithTrampoline(g_ConvertMethodPtr);
+        Log("HGRenderPath_Render hook: %s at %p",
+            installed ? "installed" : "failed", g_ConvertMethodPtr);
+        return installed;
+      }
     }
   }
 
+  Log("HGRenderPath_Render hook: method not found");
   return false;
 }
 
@@ -1277,19 +1398,28 @@ void ApplyEnhancements() {
   LoadConfig();
   RefreshConfigLastWriteTime();
   GetScreenRes();
-  TryDirectPatch();
+  LogLoadedConfig();
+  Log("Screen resolution: %d x %d", g_screenWidth, g_screenHeight);
+  bool renderHookOk = TryDirectPatch();
+  Log("ApplyEnhancements: renderHook=%s", renderHookOk ? "OK" : "FAILED");
 }
 
 bool ApplyConfigBackedSettings() {
   bool allSuccess = true;
 
-  if (ApplyManagedShadowSettings())
+  bool shadowOk = ApplyManagedShadowSettings();
+  if (shadowOk)
     g_shadowPatched = true;
   else
     allSuccess = false;
 
-  allSuccess &= ApplyGraphicsSettings();
-  allSuccess &= ApplyAASettings();
+  bool graphicsOk = ApplyGraphicsSettings();
+  bool aaOk = ApplyAASettings();
+  allSuccess &= graphicsOk && aaOk;
+
+  Log("Apply summary: shadows=%s graphics=%s aa=%s overall=%s",
+      shadowOk ? "OK" : "FAILED", graphicsOk ? "OK" : "FAILED",
+      aaOk ? "OK" : "FAILED", allSuccess ? "OK" : "FAILED");
 
   return allSuccess;
 }
@@ -1321,7 +1451,9 @@ DWORD WINAPI EnforcerThread(LPVOID) {
           (DWORD)g_liveEditIntervalMs) {
         lastLiveEditPollTick = now;
         if (HasConfigChangedOnDisk()) {
+          Log("Live edit: detected EndfieldGFX.ini change");
           LoadConfig();
+          LogLoadedConfig();
           RefreshConfigLastWriteTime();
           if (ApplyConfigBackedSettings())
             initialSettingsApplied = true;
@@ -1349,14 +1481,25 @@ DWORD WINAPI InitThread(LPVOID) {
     return 0;
   }
 
+  LoadConfig();
+  ResetLogFile();
+  Log("Ace_GFX loaded");
+  Log("Executable: %s", GetExecutablePath().c_str());
+  Log("Module: %s", GetSelfModulePath().c_str());
+
   Sleep(INIT_DELAY_MS);
 
-  if (!ResolveIL2CppAPI())
+  if (!ResolveIL2CppAPI()) {
+    Log("ResolveIL2CppAPI failed");
     return 1;
+  }
+  Log("ResolveIL2CppAPI: OK");
 
   Il2CppDomain domain = il2cpp_domain_get();
-  if (!domain)
+  if (!domain) {
+    Log("il2cpp_domain_get failed");
     return 1;
+  }
 
   if (il2cpp_thread_attach)
     il2cpp_thread_attach(domain);
@@ -1367,12 +1510,14 @@ DWORD WINAPI InitThread(LPVOID) {
   ApplyEnhancements();
 
   CreateThread(NULL, 0, EnforcerThread, NULL, 0, NULL);
+  Log("Enforcer thread created");
 
   return 0;
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID) {
   if (reason == DLL_PROCESS_ATTACH) {
+    g_hSelfModule = hModule;
     DisableThreadLibraryCalls(hModule);
     CreateThread(NULL, 0, InitThread, NULL, 0, NULL);
   } else if (reason == DLL_PROCESS_DETACH) {
