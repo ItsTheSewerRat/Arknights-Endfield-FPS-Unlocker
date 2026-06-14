@@ -1,6 +1,7 @@
 #define _CRT_SECURE_NO_WARNINGS
 #include <cstdarg>
 #include <cstdint>
+#include <math.h>
 #include <stdio.h>
 #include <string>
 #include <windows.h>
@@ -137,6 +138,97 @@ struct RenderHookOffsets {
 static RenderHookOffsets g_renderHookOffsets = {};
 static bool g_renderHookOffsetsResolved = false;
 
+struct GfxConfigSnapshot {
+  int logging;
+  int liveEdit;
+  int liveEditIntervalMs;
+  float gtaoScale;
+  float csmShadowSoftness;
+  int csmShadowRes;
+  int charShadowRes;
+  int punctualShadowRes;
+  int asmShadowRes;
+  int screenSpaceShadowMask;
+  int csmShadowSampleMode;
+  int charShadowSampleMode;
+  float csmDepthBias;
+  float csmNormalBias;
+  float csmIntensity;
+  float contactShadowIntensity;
+  float contactShadowThickness;
+  float contactShadowBilinear;
+  float contactShadowContract;
+  int aaMode;
+  int smaaQuality;
+  int ssrQuality;
+  int ssrEnable;
+  int ssrSampleCount;
+  int ssrUpsampling;
+  float renderScale;
+  int anisoLevel;
+  float sharpening;
+};
+
+struct IntWriteInfo {
+  uintptr_t ownerPtr;
+  uintptr_t settingParamPtr;
+  uintptr_t valueAddr;
+  size_t targetOffset;
+  size_t valueOffset;
+  int oldValue;
+  int newValue;
+  bool changed;
+};
+
+struct FloatWriteInfo {
+  uintptr_t ownerPtr;
+  uintptr_t settingParamPtr;
+  uintptr_t valueAddr;
+  size_t targetOffset;
+  size_t valueOffset;
+  float oldValue;
+  float newValue;
+  bool changed;
+};
+
+struct CameraAAWriteInfo {
+  uint32_t cameraCount;
+  uint32_t changedCount;
+  uintptr_t firstChangedCamera;
+  uint32_t fieldOffset;
+  int firstOldValue;
+  int newValue;
+};
+
+struct SMAAWriteInfo {
+  uintptr_t smaaInstance;
+  uintptr_t valueAddr;
+  size_t valueOffset;
+  int oldValue;
+  int newValue;
+  bool changed;
+};
+
+struct AnisoWriteInfo {
+  void *methodPtr;
+  const char *methodName;
+  int level;
+};
+
+static bool g_logNextGTAOApply = false;
+static bool g_logNextCsmShadowSoftnessApply = false;
+static bool g_logNextCsmDepthBiasApply = false;
+static bool g_logNextCsmNormalBiasApply = false;
+static bool g_logNextCsmIntensityApply = false;
+static bool g_logNextContactShadowIntensityApply = false;
+static bool g_logNextContactShadowThicknessApply = false;
+static bool g_logNextContactShadowBilinearApply = false;
+static bool g_logNextContactShadowContractApply = false;
+static int32_t g_gtaoOriginalWidth = -1;
+static int32_t g_gtaoOriginalHeight = -1;
+static int32_t g_gtaoPreviousWidth = -1;
+static int32_t g_gtaoPreviousHeight = -1;
+
 typedef void *(*ConvertSettingParamsToCpp_t)(void *settingParameters);
 static ConvertSettingParamsToCpp_t g_TrampolineFunc = nullptr;
 static void *g_pTrampoline = nullptr;
@@ -244,6 +336,208 @@ void LogColored(WORD, const char *fmt, ...) {
 #define LOG_WARNING(...) do { Log("[WARN] " __VA_ARGS__); } while (0)
 #define LOG_ERROR(...) do { Log("[ERROR] " __VA_ARGS__); } while (0)
 #define LOG_INFO(...) do { Log("[INFO] " __VA_ARGS__); } while (0)
+
+bool FloatChanged(float a, float b) {
+  return fabsf(a - b) > 0.0001f;
+}
+
+bool HasPendingShadowApplyLog() {
+  return g_logNextCsmShadowSoftnessApply || g_logNextCsmDepthBiasApply ||
+         g_logNextCsmNormalBiasApply || g_logNextCsmIntensityApply ||
+         g_logNextContactShadowIntensityApply ||
+         g_logNextContactShadowThicknessApply ||
+         g_logNextContactShadowBilinearApply ||
+         g_logNextContactShadowContractApply;
+}
+
+void ClearPendingShadowApplyLogs() {
+  g_logNextCsmShadowSoftnessApply = false;
+  g_logNextCsmDepthBiasApply = false;
+  g_logNextCsmNormalBiasApply = false;
+  g_logNextCsmIntensityApply = false;
+  g_logNextContactShadowIntensityApply = false;
+  g_logNextContactShadowThicknessApply = false;
+  g_logNextContactShadowBilinearApply = false;
+  g_logNextContactShadowContractApply = false;
+}
+
+GfxConfigSnapshot CaptureConfigSnapshot() {
+  GfxConfigSnapshot config = {};
+  config.logging = g_logging;
+  config.liveEdit = g_liveEdit;
+  config.liveEditIntervalMs = g_liveEditIntervalMs;
+  config.gtaoScale = g_gtaoScale;
+  config.csmShadowSoftness = g_csmShadowSoftness;
+  config.csmShadowRes = g_csmShadowRes;
+  config.charShadowRes = g_charShadowRes;
+  config.punctualShadowRes = g_punctualShadowRes;
+  config.asmShadowRes = g_asmShadowRes;
+  config.screenSpaceShadowMask = g_screenSpaceShadowMask;
+  config.csmShadowSampleMode = g_csmShadowSampleMode;
+  config.charShadowSampleMode = g_charShadowSampleMode;
+  config.csmDepthBias = g_csmDepthBias;
+  config.csmNormalBias = g_csmNormalBias;
+  config.csmIntensity = g_csmIntensity;
+  config.contactShadowIntensity = g_contactShadowIntensity;
+  config.contactShadowThickness = g_contactShadowThickness;
+  config.contactShadowBilinear = g_contactShadowBilinear;
+  config.contactShadowContract = g_contactShadowContract;
+  config.aaMode = g_aaMode;
+  config.smaaQuality = g_smaaQuality;
+  config.ssrQuality = g_ssrQuality;
+  config.ssrEnable = g_ssrEnable;
+  config.ssrSampleCount = g_ssrSampleCount;
+  config.ssrUpsampling = g_ssrUpsampling;
+  config.renderScale = g_renderScale;
+  config.anisoLevel = g_anisoLevel;
+  config.sharpening = g_sharpening;
+  return config;
+}
+
+bool ShouldLogIntApply(int value, int oldValue, bool active, bool oldActive,
+                       const GfxConfigSnapshot *before) {
+  if (!before)
+    return active;
+  return active != oldActive || (active && value != oldValue);
+}
+
+bool ShouldLogFloatApply(float value, float oldValue, bool active,
+                         bool oldActive, const GfxConfigSnapshot *before) {
+  if (!before)
+    return active;
+  return active != oldActive || (active && FloatChanged(value, oldValue));
+}
+
+void LogConfigIntSetting(const char *name, int value, int oldValue,
+                         bool active, bool oldActive,
+                         const GfxConfigSnapshot *before, int *loggedCount) {
+  if (!before) {
+    if (active) {
+      Log("    %s = %d", name, value);
+      (*loggedCount)++;
+    }
+    return;
+  }
+
+  if (!ShouldLogIntApply(value, oldValue, active, oldActive, before))
+    return;
+
+  if (active && oldActive)
+    Log("    %s: %d -> %d", name, oldValue, value);
+  else if (active)
+    Log("    %s: disabled -> %d", name, value);
+  else
+    Log("    %s: %d -> disabled", name, oldValue);
+  (*loggedCount)++;
+}
+
+void LogConfigFloatSetting(const char *name, float value, float oldValue,
+                           bool active, bool oldActive,
+                           const GfxConfigSnapshot *before, int *loggedCount) {
+  if (!before) {
+    if (active) {
+      Log("    %s = %.3f", name, value);
+      (*loggedCount)++;
+    }
+    return;
+  }
+
+  if (!ShouldLogFloatApply(value, oldValue, active, oldActive, before))
+    return;
+
+  if (active && oldActive)
+    Log("    %s: %.3f -> %.3f", name, oldValue, value);
+  else if (active)
+    Log("    %s: disabled -> %.3f", name, value);
+  else
+    Log("    %s: %.3f -> disabled", name, oldValue);
+  (*loggedCount)++;
+}
+
+void LogSettingDisabled(const char *settingName) {
+  Log("%s apply:", settingName);
+  Log("  configured: disabled");
+  Log("  runtime write: skipped");
+}
+
+void LogIntWriteResult(const char *settingName, const char *fieldName, bool ok,
+                       const IntWriteInfo &info) {
+  Log("%s apply:", settingName);
+  Log("  IL2CPP field: %s", fieldName);
+  if (info.ownerPtr)
+    Log("  owner pointer: %p", (void *)info.ownerPtr);
+  if (info.settingParamPtr)
+    Log("  setting parameter pointer: %p", (void *)info.settingParamPtr);
+  if (info.targetOffset)
+    Log("  field offset: 0x%zX", info.targetOffset);
+  if (info.valueAddr)
+    Log("  value address: %p", (void *)info.valueAddr);
+  if (info.valueOffset)
+    Log("  value field offset: 0x%zX", info.valueOffset);
+  if (ok)
+    Log("  value: %d -> %d (%s)", info.oldValue, info.newValue,
+        info.changed ? "written" : "unchanged");
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
+void LogFloatWriteResult(const char *settingName, const char *fieldName,
+                         bool ok, const FloatWriteInfo &info) {
+  Log("%s apply:", settingName);
+  Log("  IL2CPP field: %s", fieldName);
+  if (info.ownerPtr)
+    Log("  owner pointer: %p", (void *)info.ownerPtr);
+  if (info.settingParamPtr)
+    Log("  setting parameter pointer: %p", (void *)info.settingParamPtr);
+  if (info.targetOffset)
+    Log("  field offset: 0x%zX", info.targetOffset);
+  if (info.valueAddr)
+    Log("  value address: %p", (void *)info.valueAddr);
+  if (info.valueOffset)
+    Log("  value field offset: 0x%zX", info.valueOffset);
+  if (ok)
+    Log("  value: %.3f -> %.3f (%s)", info.oldValue, info.newValue,
+        info.changed ? "written" : "unchanged");
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
+void LogCameraAAWriteResult(bool ok, const CameraAAWriteInfo &info) {
+  Log("AA apply:");
+  Log("  IL2CPP field: HG.Rendering.Runtime.HGAdditionalCameraData.antialiasing");
+  if (info.fieldOffset)
+    Log("  field offset: 0x%X", info.fieldOffset);
+  Log("  cameras found: %u", info.cameraCount);
+  Log("  cameras changed: %u", info.changedCount);
+  if (info.firstChangedCamera)
+    Log("  first changed camera: %p", (void *)info.firstChangedCamera);
+  if (ok && info.changedCount > 0)
+    Log("  first changed value: %d -> %d", info.firstOldValue, info.newValue);
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
+void LogSMAAWriteResult(bool ok, const SMAAWriteInfo &info) {
+  Log("SMAA apply:");
+  Log("  IL2CPP field: HG.Rendering.Runtime.HGSMAA.s_instance");
+  if (info.smaaInstance)
+    Log("  instance pointer: %p", (void *)info.smaaInstance);
+  if (info.valueAddr)
+    Log("  value address: %p", (void *)info.valueAddr);
+  if (info.valueOffset)
+    Log("  mode offset: 0x%zX", info.valueOffset);
+  if (ok)
+    Log("  value: %d -> %d (%s)", info.oldValue, info.newValue,
+        info.changed ? "written" : "unchanged");
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
+void LogAnisoWriteResult(bool ok, const AnisoWriteInfo &info) {
+  Log("AnisoLevel apply:");
+  Log("  IL2CPP method: %s", info.methodName ? info.methodName : "not resolved");
+  if (info.methodPtr)
+    Log("  method pointer: %p", info.methodPtr);
+  Log("  level: %d", info.level);
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
 template <typename T> inline bool SafeRead(uintptr_t addr, T *out) {
   __try {
     if (addr < 0x10000 || addr > 0x00007FFFFFFFFFFF)
@@ -404,7 +698,11 @@ void *GetObjectClass(uintptr_t objAddr) {
   return il2cpp_object_get_class((void *)objAddr);
 }
 
-bool SetSettingParameterValue(const char *settingName, int value) {
+bool SetSettingParameterValue(const char *settingName, int value,
+                              IntWriteInfo *writeInfo = nullptr) {
+  if (writeInfo)
+    *writeInfo = {};
+
   if (!il2cpp_class_get_field_from_name || !il2cpp_field_static_get_value ||
       !il2cpp_field_get_offset)
     return false;
@@ -490,13 +788,28 @@ bool SetSettingParameterValue(const char *settingName, int value) {
   int oldValue = 0;
   SafeRead(valueAddr, &oldValue);
 
+  if (writeInfo) {
+    writeInfo->ownerPtr = settingsPtr;
+    writeInfo->settingParamPtr = settingParamPtr;
+    writeInfo->valueAddr = valueAddr;
+    writeInfo->targetOffset = targetOffset;
+    writeInfo->valueOffset = paramOffset;
+    writeInfo->oldValue = oldValue;
+    writeInfo->newValue = value;
+    writeInfo->changed = oldValue != value;
+  }
+
   if (!SafeWrite(valueAddr, value))
     return false;
 
   return true;
 }
 
-bool SetShadowManagerValue(const char *fieldName, int value) {
+bool SetShadowManagerValue(const char *fieldName, int value,
+                           IntWriteInfo *writeInfo = nullptr) {
+  if (writeInfo)
+    *writeInfo = {};
+
   if (!fieldName || !il2cpp_class_get_field_from_name ||
       !il2cpp_field_static_get_value || !il2cpp_field_get_offset)
     return false;
@@ -548,24 +861,75 @@ bool SetShadowManagerValue(const char *fieldName, int value) {
     return false;
 
   size_t targetOffset = il2cpp_field_get_offset(targetField);
-  return SafeWrite(shadowManagerPtr + targetOffset, value);
+  uintptr_t valueAddr = shadowManagerPtr + targetOffset;
+  int oldValue = 0;
+  SafeRead(valueAddr, &oldValue);
+
+  if (writeInfo) {
+    writeInfo->ownerPtr = shadowManagerPtr;
+    writeInfo->valueAddr = valueAddr;
+    writeInfo->targetOffset = targetOffset;
+    writeInfo->valueOffset = targetOffset;
+    writeInfo->oldValue = oldValue;
+    writeInfo->newValue = value;
+    writeInfo->changed = oldValue != value;
+  }
+
+  return SafeWrite(valueAddr, value);
 }
 
-bool ApplyManagedShadowSettings() {
+bool ApplyManagedShadowSettings(const GfxConfigSnapshot *before = nullptr) {
   bool success = true;
 
-  if (g_csmShadowRes >= 0)
-    success &= SetSettingParameterValue("csmShadowMapTileResolution", g_csmShadowRes);
-  if (g_charShadowRes >= 0)
-    success &= SetSettingParameterValue("characterShadowMapResolution", g_charShadowRes);
-  if (g_punctualShadowRes >= 0)
-    success &= SetSettingParameterValue("punctualLightTileMaxSize", g_punctualShadowRes);
-  if (g_asmShadowRes >= 0)
-    success &= SetSettingParameterValue("asmShadowMapTileResolution", g_asmShadowRes);
+#define APPLY_SETTING_INT(configValue, beforeMember, configName, il2cppField, runtimeField) \
+  do { \
+    bool active = (configValue) >= 0; \
+    bool oldActive = before ? before->beforeMember >= 0 : false; \
+    int oldValue = before ? before->beforeMember : -1; \
+    bool logThis = ShouldLogIntApply((configValue), oldValue, active, oldActive, before); \
+    if (active) { \
+      IntWriteInfo info; \
+      bool ok = SetSettingParameterValue((runtimeField), (configValue), &info); \
+      success &= ok; \
+      if (logThis) \
+        LogIntWriteResult((configName), (il2cppField), ok, info); \
+    } else if (logThis) { \
+      LogSettingDisabled((configName)); \
+    } \
+  } while (0)
 
-  if (g_csmShadowSampleMode >= 0)
-    success &= SetShadowManagerValue("m_csmShadowSampleMode",
-                                     g_csmShadowSampleMode);
+  APPLY_SETTING_INT(g_csmShadowRes, csmShadowRes, "CSMShadowRes",
+                    "HGSettingParameters.csmShadowMapTileResolution.paramValue",
+                    "csmShadowMapTileResolution");
+  APPLY_SETTING_INT(g_charShadowRes, charShadowRes, "CharacterShadowRes",
+                    "HGSettingParameters.characterShadowMapResolution.paramValue",
+                    "characterShadowMapResolution");
+  APPLY_SETTING_INT(g_punctualShadowRes, punctualShadowRes,
+                    "PunctualLightShadowRes",
+                    "HGSettingParameters.punctualLightTileMaxSize.paramValue",
+                    "punctualLightTileMaxSize");
+  APPLY_SETTING_INT(g_asmShadowRes, asmShadowRes, "ASMShadowRes",
+                    "HGSettingParameters.asmShadowMapTileResolution.paramValue",
+                    "asmShadowMapTileResolution");
+
+#undef APPLY_SETTING_INT
+
+  bool sampleActive = g_csmShadowSampleMode >= 0;
+  bool oldSampleActive = before ? before->csmShadowSampleMode >= 0 : false;
+  int oldSampleValue = before ? before->csmShadowSampleMode : -1;
+  bool logSample = ShouldLogIntApply(g_csmShadowSampleMode, oldSampleValue,
+                                     sampleActive, oldSampleActive, before);
+  if (sampleActive) {
+    IntWriteInfo info;
+    bool ok = SetShadowManagerValue("m_csmShadowSampleMode",
+                                    g_csmShadowSampleMode, &info);
+    success &= ok;
+    if (logSample)
+      LogIntWriteResult("CSMShadowSampleMode",
+                        "HGShadowManager.m_csmShadowSampleMode", ok, info);
+  } else if (logSample) {
+    LogSettingDisabled("CSMShadowSampleMode");
+  }
 
   return success;
 }
@@ -595,7 +959,54 @@ void ApplySSRQualityPreset(int& ssrEnable, int& sampleCount, int& upsampling) {
   }
 }
 
-bool SetSettingParameterFloatValue(const char *settingName, float value) {
+void ResolveSSRValues(int quality, int configuredEnable, int configuredSamples,
+                      int configuredUpsampling, int *ssrEnable,
+                      int *sampleCount, int *upsampling) {
+  *ssrEnable = configuredEnable;
+  *sampleCount = configuredSamples;
+  *upsampling = configuredUpsampling;
+
+  switch (quality) {
+    case 0:
+      *ssrEnable = 0;
+      break;
+    case 1:
+      *ssrEnable = 1;
+      *sampleCount = 128;
+      *upsampling = 1;
+      break;
+    case 2:
+      *ssrEnable = 1;
+      *sampleCount = 192;
+      *upsampling = 1;
+      break;
+    case 3:
+      *ssrEnable = 1;
+      *sampleCount = 256;
+      *upsampling = 1;
+      break;
+    case 4:
+      *ssrEnable = 1;
+      *sampleCount = 512;
+      *upsampling = 0;
+      break;
+    default:
+      break;
+  }
+
+  if (configuredEnable >= 0)
+    *ssrEnable = configuredEnable;
+  if (configuredSamples >= 0)
+    *sampleCount = configuredSamples;
+  if (configuredUpsampling >= 0)
+    *upsampling = configuredUpsampling;
+}
+
+bool SetSettingParameterFloatValue(const char *settingName, float value,
+                                   FloatWriteInfo *writeInfo = nullptr) {
+  if (writeInfo)
+    *writeInfo = {};
+
   if (!il2cpp_class_get_field_from_name || !il2cpp_field_static_get_value ||
       !il2cpp_field_get_offset)
     return false;
@@ -642,12 +1053,28 @@ bool SetSettingParameterFloatValue(const char *settingName, float value) {
   float oldValue = 0;
   SafeRead(valueAddr, &oldValue);
 
+  if (writeInfo) {
+    writeInfo->ownerPtr = settingsPtr;
+    writeInfo->settingParamPtr = settingParamPtr;
+    writeInfo->valueAddr = valueAddr;
+    writeInfo->targetOffset = targetOffset;
+    writeInfo->valueOffset = paramOffset;
+    writeInfo->oldValue = oldValue;
+    writeInfo->newValue = value;
+    writeInfo->changed = FloatChanged(oldValue, value);
+  }
+
   if (!SafeWrite(valueAddr, value)) return false;
 
   return true;
 }
 
-bool ApplyAnisotropicFiltering(int level) {
+bool ApplyAnisotropicFiltering(int level, AnisoWriteInfo *writeInfo = nullptr) {
+  if (writeInfo) {
+    *writeInfo = {};
+    writeInfo->level = level;
+  }
+
   if (!il2cpp_class_from_name || !il2cpp_class_get_method_from_name)
     return false;
 
@@ -663,6 +1090,11 @@ bool ApplyAnisotropicFiltering(int level) {
   if (setLimitsMethod) {
     void *methodPtr = GetMethodPointer(setLimitsMethod);
     if (methodPtr) {
+      if (writeInfo) {
+        writeInfo->methodPtr = methodPtr;
+        writeInfo->methodName =
+            "UnityEngine.Texture.SetGlobalAnisotropicFilteringLimits";
+      }
       typedef void (*SetLimitsFunc)(int, int);
       ((SetLimitsFunc)methodPtr)(level, level);
       return true;
@@ -676,6 +1108,11 @@ bool ApplyAnisotropicFiltering(int level) {
     if (setAniso) {
       void *methodPtr = GetMethodPointer(setAniso);
       if (methodPtr) {
+        if (writeInfo) {
+          writeInfo->methodPtr = methodPtr;
+          writeInfo->methodName =
+              "UnityEngine.QualitySettings.set_anisotropicFiltering";
+        }
         int mode = (level > 1) ? 2 : (level > 0 ? 1 : 0);
         typedef void (*SetAnisoFunc)(int);
         ((SetAnisoFunc)methodPtr)(mode);
@@ -686,35 +1123,97 @@ bool ApplyAnisotropicFiltering(int level) {
   return true;
 }
 
-bool ApplyGraphicsSettings() {
+bool ApplyGraphicsSettings(const GfxConfigSnapshot *before = nullptr) {
   bool success = true;
 
-  int ssrEnable = g_ssrEnable;
-  int ssrSamples = g_ssrSampleCount;
-  int ssrUpsample = g_ssrUpsampling;
+  int ssrEnable = -1;
+  int ssrSamples = -1;
+  int ssrUpsample = -1;
+  ResolveSSRValues(g_ssrQuality, g_ssrEnable, g_ssrSampleCount,
+                   g_ssrUpsampling, &ssrEnable, &ssrSamples, &ssrUpsample);
+  if (g_ssrQuality == 4)
+    g_ssrResScale = 1.0f;
 
-  if (g_ssrQuality >= 0)
-    ApplySSRQualityPreset(ssrEnable, ssrSamples, ssrUpsample);
-
-  if (g_ssrEnable >= 0) ssrEnable = g_ssrEnable;
-  if (g_ssrSampleCount >= 0) ssrSamples = g_ssrSampleCount;
-  if (g_ssrUpsampling >= 0) ssrUpsample = g_ssrUpsampling;
-
-  if (ssrEnable >= 0)
-    success &= SetSettingParameterValue("ssrEnable", ssrEnable);
-  if (ssrSamples >= 0)
-    success &= SetSettingParameterValue("ssrRayMarchingSampleCount", ssrSamples);
-  if (ssrUpsample >= 0)
-    success &= SetSettingParameterValue("ssrV2Upsample", ssrUpsample);
-
-  if (g_anisoLevel > 0)
-    ApplyAnisotropicFiltering(g_anisoLevel);
-
-  if (g_sharpening >= 0) {
-    SetSettingParameterFloatValue("sharpenStrength1K", g_sharpening);
-    SetSettingParameterFloatValue("sharpenStrength2K", g_sharpening);
-    SetSettingParameterFloatValue("sharpenStrength4K", g_sharpening);
+  int oldSsrEnable = -1;
+  int oldSsrSamples = -1;
+  int oldSsrUpsample = -1;
+  if (before) {
+    ResolveSSRValues(before->ssrQuality, before->ssrEnable,
+                     before->ssrSampleCount, before->ssrUpsampling,
+                     &oldSsrEnable, &oldSsrSamples, &oldSsrUpsample);
   }
+
+#define APPLY_GRAPHICS_INT(configName, il2cppField, runtimeField, value, oldValue) \
+  do { \
+    bool active = (value) >= 0; \
+    bool oldActive = before ? (oldValue) >= 0 : false; \
+    bool logThis = ShouldLogIntApply((value), (oldValue), active, oldActive, before); \
+    if (active) { \
+      IntWriteInfo info; \
+      bool ok = SetSettingParameterValue((runtimeField), (value), &info); \
+      success &= ok; \
+      if (logThis) \
+        LogIntWriteResult((configName), (il2cppField), ok, info); \
+    } else if (logThis) { \
+      LogSettingDisabled((configName)); \
+    } \
+  } while (0)
+
+  APPLY_GRAPHICS_INT("SSREnable",
+                     "HGSettingParameters.ssrEnable.paramValue",
+                     "ssrEnable", ssrEnable, oldSsrEnable);
+  APPLY_GRAPHICS_INT("SSRSampleCount",
+                     "HGSettingParameters.ssrRayMarchingSampleCount.paramValue",
+                     "ssrRayMarchingSampleCount", ssrSamples, oldSsrSamples);
+  APPLY_GRAPHICS_INT("SSRUpsampling",
+                     "HGSettingParameters.ssrV2Upsample.paramValue",
+                     "ssrV2Upsample", ssrUpsample, oldSsrUpsample);
+
+#undef APPLY_GRAPHICS_INT
+
+  bool anisoActive = g_anisoLevel > 0;
+  bool oldAnisoActive = before ? before->anisoLevel > 0 : false;
+  int oldAnisoValue = before ? before->anisoLevel : -1;
+  bool logAniso = ShouldLogIntApply(g_anisoLevel, oldAnisoValue, anisoActive,
+                                    oldAnisoActive, before);
+  if (anisoActive) {
+    AnisoWriteInfo info;
+    bool ok = ApplyAnisotropicFiltering(g_anisoLevel, &info);
+    success &= ok;
+    if (logAniso)
+      LogAnisoWriteResult(ok, info);
+  } else if (logAniso) {
+    LogSettingDisabled("AnisoLevel");
+  }
+
+#define APPLY_SHARPEN_FLOAT(configName, il2cppField, runtimeField) \
+  do { \
+    bool active = g_sharpening >= 0.0f; \
+    bool oldActive = before ? before->sharpening >= 0.0f : false; \
+    float oldValue = before ? before->sharpening : -1.0f; \
+    bool logThis = ShouldLogFloatApply(g_sharpening, oldValue, active, oldActive, before); \
+    if (active) { \
+      FloatWriteInfo info; \
+      bool ok = SetSettingParameterFloatValue((runtimeField), g_sharpening, &info); \
+      success &= ok; \
+      if (logThis) \
+        LogFloatWriteResult((configName), (il2cppField), ok, info); \
+    } else if (logThis) { \
+      LogSettingDisabled((configName)); \
+    } \
+  } while (0)
+
+  APPLY_SHARPEN_FLOAT("Sharpening 1K",
+                      "HGSettingParameters.sharpenStrength1K.paramValue",
+                      "sharpenStrength1K");
+  APPLY_SHARPEN_FLOAT("Sharpening 2K",
+                      "HGSettingParameters.sharpenStrength2K.paramValue",
+                      "sharpenStrength2K");
+  APPLY_SHARPEN_FLOAT("Sharpening 4K",
+                      "HGSettingParameters.sharpenStrength4K.paramValue",
+                      "sharpenStrength4K");
+
+#undef APPLY_SHARPEN_FLOAT
 
   return success;
 }
@@ -724,7 +1223,12 @@ static int g_lastAppliedSMAAQuality = -99;
 static bool g_aaFieldOffsetCached = false;
 static uint32_t g_aaFieldOffset = 0;
 
-bool ApplyAAToAllCameras(int aaMode) {
+bool ApplyAAToAllCameras(int aaMode, CameraAAWriteInfo *writeInfo = nullptr) {
+  if (writeInfo) {
+    *writeInfo = {};
+    writeInfo->newValue = aaMode;
+  }
+
   if (!il2cpp_class_from_name || !il2cpp_class_get_fields || !il2cpp_field_get_name ||
       !il2cpp_field_get_offset || !il2cpp_class_get_type || !il2cpp_type_get_object ||
       !il2cpp_runtime_invoke || !il2cpp_class_get_method_from_name)
@@ -752,6 +1256,9 @@ bool ApplyAAToAllCameras(int aaMode) {
     if (!g_aaFieldOffsetCached)
       return false;
   }
+
+  if (writeInfo)
+    writeInfo->fieldOffset = g_aaFieldOffset;
 
   void *type = il2cpp_class_get_type(camDataClass);
   void *systemType = il2cpp_type_get_object(type);
@@ -783,6 +1290,8 @@ bool ApplyAAToAllCameras(int aaMode) {
 
   uint32_t count = 0;
   SafeRead((uintptr_t)result + 0x18, &count);
+  if (writeInfo)
+    writeInfo->cameraCount = count;
 
   if (count == 0)
     return true;
@@ -793,15 +1302,27 @@ bool ApplyAAToAllCameras(int aaMode) {
     if (objAddr) {
       int currentVal = 0;
       SafeRead(objAddr + g_aaFieldOffset, &currentVal);
-      if (currentVal != aaMode)
+      if (currentVal != aaMode) {
+        if (writeInfo && writeInfo->changedCount == 0) {
+          writeInfo->firstChangedCamera = objAddr;
+          writeInfo->firstOldValue = currentVal;
+        }
+        if (writeInfo)
+          writeInfo->changedCount++;
         SafeWrite(objAddr + g_aaFieldOffset, aaMode);
+      }
     }
   }
 
   return true;
 }
 
-bool ApplySMAAQuality(int quality) {
+bool ApplySMAAQuality(int quality, SMAAWriteInfo *writeInfo = nullptr) {
+  if (writeInfo) {
+    *writeInfo = {};
+    writeInfo->newValue = quality;
+  }
+
   if (!il2cpp_class_from_name || !il2cpp_class_get_field_from_name ||
       !il2cpp_field_static_get_value || !il2cpp_field_get_offset)
     return false;
@@ -851,27 +1372,63 @@ bool ApplySMAAQuality(int quality) {
   int currentMode = 0;
   SafeRead(smaaInstance + SMAA_MODE_OFFSET, &currentMode);
 
-  if (currentMode != quality)
-    SafeWrite(smaaInstance + SMAA_MODE_OFFSET, quality);
+  if (writeInfo) {
+    writeInfo->smaaInstance = smaaInstance;
+    writeInfo->valueAddr = smaaInstance + SMAA_MODE_OFFSET;
+    writeInfo->valueOffset = SMAA_MODE_OFFSET;
+    writeInfo->oldValue = currentMode;
+    writeInfo->changed = currentMode != quality;
+  }
+
+  if (currentMode != quality && !SafeWrite(smaaInstance + SMAA_MODE_OFFSET, quality))
+    return false;
 
   return true;
 }
 
-bool ApplyAASettings() {
+bool ApplyAASettings(const GfxConfigSnapshot *before = nullptr) {
   bool success = true;
+  bool aaActive = g_aaMode == 0;
+  bool oldAAActive = before ? before->aaMode == 0 : false;
+  int oldAAValue = before ? before->aaMode : 1;
+  bool logAA = ShouldLogIntApply(g_aaMode, oldAAValue, aaActive,
+                                 oldAAActive, before);
 
   if (g_aaMode == 0) {
-    if (ApplyAAToAllCameras(0))
+    CameraAAWriteInfo info;
+    if (ApplyAAToAllCameras(0, &info)) {
       g_lastAppliedAAMode = 0;
-    else
+      if (logAA)
+        LogCameraAAWriteResult(true, info);
+    } else {
       success = false;
+      if (logAA)
+        LogCameraAAWriteResult(false, info);
+    }
 
+    bool smaaActive = g_smaaQuality >= 0;
+    bool oldSmaaActive = before ? before->smaaQuality >= 0 && oldAAActive : false;
+    int oldSmaaValue = before ? before->smaaQuality : -1;
+    bool logSmaa = ShouldLogIntApply(g_smaaQuality, oldSmaaValue,
+                                     smaaActive, oldSmaaActive, before);
     if (g_smaaQuality >= 0) {
-      if (ApplySMAAQuality(g_smaaQuality))
+      SMAAWriteInfo smaaInfo;
+      if (ApplySMAAQuality(g_smaaQuality, &smaaInfo)) {
         g_lastAppliedSMAAQuality = g_smaaQuality;
+        if (logSmaa)
+          LogSMAAWriteResult(true, smaaInfo);
+      } else {
+        success = false;
+        if (logSmaa)
+          LogSMAAWriteResult(false, smaaInfo);
+      }
+    } else if (logSmaa) {
+      LogSettingDisabled("SMAA");
     }
   } else {
     g_lastAppliedAAMode = 1;
+    if (logAA)
+      LogSettingDisabled("AA");
   }
 
   return success;
@@ -990,18 +1547,142 @@ void LoadConfig() {
   g_sharpening = GetPrivateProfileFloat("Graphics", "Sharpening", -1.0f, g_iniPath);
 }
 
-void LogLoadedConfig() {
-  Log("Config: path=%s Logging=%d LiveEdit=%d LiveEditIntervalMs=%d",
-      g_iniPath, g_logging, g_liveEdit, g_liveEditIntervalMs);
-  Log("Config graphics: GTAORes=%.3f CSMShadowSoftness=%.3f CSMShadowRes=%d CharacterShadowRes=%d PunctualLightShadowRes=%d ASMShadowRes=%d",
-      g_gtaoScale, g_csmShadowSoftness, g_csmShadowRes, g_charShadowRes,
-      g_punctualShadowRes, g_asmShadowRes);
-  Log("Config shadows: ScreenSpaceShadowMask=%d CSMShadowSampleMode=%d CharacterShadowSampleMode=%d CSMDepthBias=%.3f CSMNormalBias=%.3f CSMIntensity=%.3f",
-      g_screenSpaceShadowMask, g_csmShadowSampleMode, g_charShadowSampleMode,
-      g_csmDepthBias, g_csmNormalBias, g_csmIntensity);
-  Log("Config post: AA=%d SMAA=%d SSRQuality=%d SSREnable=%d SSRSampleCount=%d SSRUpsampling=%d RenderScale=%.3f AnisoLevel=%d Sharpening=%.3f",
-      g_aaMode, g_smaaQuality, g_ssrQuality, g_ssrEnable, g_ssrSampleCount,
-      g_ssrUpsampling, g_renderScale, g_anisoLevel, g_sharpening);
+void LogConfigSelection(const char *reason, const GfxConfigSnapshot *before) {
+  Log("%s config:", reason);
+  Log("  path: %s", g_iniPath);
+
+  if (!before) {
+    if (g_liveEdit || g_liveEditIntervalMs != DEFAULT_LIVE_EDIT_INTERVAL_MS) {
+      Log("  controls:");
+      Log("    LiveEdit = %d", g_liveEdit);
+      Log("    LiveEditIntervalMs = %d", g_liveEditIntervalMs);
+    }
+  } else if (g_liveEdit != before->liveEdit ||
+             g_liveEditIntervalMs != before->liveEditIntervalMs) {
+    Log("  controls changed:");
+    if (g_liveEdit != before->liveEdit)
+      Log("    LiveEdit: %d -> %d", before->liveEdit, g_liveEdit);
+    if (g_liveEditIntervalMs != before->liveEditIntervalMs)
+      Log("    LiveEditIntervalMs: %d -> %d", before->liveEditIntervalMs,
+          g_liveEditIntervalMs);
+  }
+
+  Log("  %s graphics edits:", before ? "changed" : "active");
+  int logged = 0;
+
+  LogConfigFloatSetting("GTAORes", g_gtaoScale,
+                        before ? before->gtaoScale : -1.0f,
+                        g_gtaoScale >= 0.0f,
+                        before ? before->gtaoScale >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("CSMShadowSoftness", g_csmShadowSoftness,
+                        before ? before->csmShadowSoftness : -1.0f,
+                        g_csmShadowSoftness >= 0.0f,
+                        before ? before->csmShadowSoftness >= 0.0f : false,
+                        before, &logged);
+  LogConfigIntSetting("CSMShadowRes", g_csmShadowRes,
+                      before ? before->csmShadowRes : -1,
+                      g_csmShadowRes >= 0,
+                      before ? before->csmShadowRes >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("CharacterShadowRes", g_charShadowRes,
+                      before ? before->charShadowRes : -1,
+                      g_charShadowRes >= 0,
+                      before ? before->charShadowRes >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("PunctualLightShadowRes", g_punctualShadowRes,
+                      before ? before->punctualShadowRes : -1,
+                      g_punctualShadowRes >= 0,
+                      before ? before->punctualShadowRes >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("ASMShadowRes", g_asmShadowRes,
+                      before ? before->asmShadowRes : -1,
+                      g_asmShadowRes >= 0,
+                      before ? before->asmShadowRes >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("CSMShadowSampleMode", g_csmShadowSampleMode,
+                      before ? before->csmShadowSampleMode : -1,
+                      g_csmShadowSampleMode >= 0,
+                      before ? before->csmShadowSampleMode >= 0 : false,
+                      before, &logged);
+  LogConfigFloatSetting("CSMDepthBias", g_csmDepthBias,
+                        before ? before->csmDepthBias : -1.0f,
+                        g_csmDepthBias >= 0.0f,
+                        before ? before->csmDepthBias >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("CSMNormalBias", g_csmNormalBias,
+                        before ? before->csmNormalBias : -1.0f,
+                        g_csmNormalBias >= 0.0f,
+                        before ? before->csmNormalBias >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("CSMIntensity", g_csmIntensity,
+                        before ? before->csmIntensity : -1.0f,
+                        g_csmIntensity >= 0.0f,
+                        before ? before->csmIntensity >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("ContactShadowIntensity", g_contactShadowIntensity,
+                        before ? before->contactShadowIntensity : -1.0f,
+                        g_contactShadowIntensity >= 0.0f,
+                        before ? before->contactShadowIntensity >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("ContactShadowThickness", g_contactShadowThickness,
+                        before ? before->contactShadowThickness : -1.0f,
+                        g_contactShadowThickness >= 0.0f,
+                        before ? before->contactShadowThickness >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("ContactShadowBilinear", g_contactShadowBilinear,
+                        before ? before->contactShadowBilinear : -1.0f,
+                        g_contactShadowBilinear >= 0.0f,
+                        before ? before->contactShadowBilinear >= 0.0f : false,
+                        before, &logged);
+  LogConfigFloatSetting("ContactShadowContract", g_contactShadowContract,
+                        before ? before->contactShadowContract : -1.0f,
+                        g_contactShadowContract >= 0.0f,
+                        before ? before->contactShadowContract >= 0.0f : false,
+                        before, &logged);
+  LogConfigIntSetting("AA", g_aaMode, before ? before->aaMode : 1,
+                      g_aaMode == 0, before ? before->aaMode == 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("SMAA", g_smaaQuality,
+                      before ? before->smaaQuality : -1,
+                      g_aaMode == 0 && g_smaaQuality >= 0,
+                      before ? before->aaMode == 0 &&
+                                   before->smaaQuality >= 0
+                             : false,
+                      before, &logged);
+  LogConfigIntSetting("SSRQuality", g_ssrQuality,
+                      before ? before->ssrQuality : -1,
+                      g_ssrQuality >= 0,
+                      before ? before->ssrQuality >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("SSREnable", g_ssrEnable,
+                      before ? before->ssrEnable : -1,
+                      g_ssrEnable >= 0,
+                      before ? before->ssrEnable >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("SSRSampleCount", g_ssrSampleCount,
+                      before ? before->ssrSampleCount : -1,
+                      g_ssrSampleCount >= 0,
+                      before ? before->ssrSampleCount >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("SSRUpsampling", g_ssrUpsampling,
+                      before ? before->ssrUpsampling : -1,
+                      g_ssrUpsampling >= 0,
+                      before ? before->ssrUpsampling >= 0 : false,
+                      before, &logged);
+  LogConfigIntSetting("AnisoLevel", g_anisoLevel,
+                      before ? before->anisoLevel : -1,
+                      g_anisoLevel > 0,
+                      before ? before->anisoLevel > 0 : false,
+                      before, &logged);
+  LogConfigFloatSetting("Sharpening", g_sharpening,
+                        before ? before->sharpening : -1.0f,
+                        g_sharpening >= 0.0f,
+                        before ? before->sharpening >= 0.0f : false,
+                        before, &logged);
+
+  if (logged == 0)
+    Log("    none");
 }
 
 bool ResolveIL2CppAPI() {
@@ -1179,6 +1860,63 @@ typedef void (*RenderPathFunc_t)(int64_t _ptr, void *renderPathParams,
                                  void *renderContext, void *_cmd);
 static RenderPathFunc_t g_OriginalRenderPath = nullptr;
 
+void LogGTAOApplyResult(void *renderPathParams, void *gtaoPtr, int32_t oldWidth,
+                        int32_t oldHeight, int32_t targetWidth,
+                        int32_t targetHeight, bool wroteValues) {
+  Log("GTAORes apply:");
+  Log("  IL2CPP field: HGRenderPathParamsCPP.gtaoSettingParameters");
+  Log("  renderPathParams: %p", renderPathParams);
+  Log("  gtao settings pointer: %p", gtaoPtr);
+  Log("  gtao offset: 0x%zX", g_renderHookOffsets.renderParamsGtaoPtr);
+  Log("  width field offset: 0x%zX", g_renderHookOffsets.gtaoScreenWidth);
+  Log("  height field offset: 0x%zX", g_renderHookOffsets.gtaoScreenHeight);
+  Log("  screen resolution: %d x %d", g_screenWidth, g_screenHeight);
+  if (g_gtaoOriginalWidth >= 0 && g_gtaoOriginalHeight >= 0)
+    Log("  original GTAO resolution: %d x %d", g_gtaoOriginalWidth,
+        g_gtaoOriginalHeight);
+  if (g_gtaoPreviousWidth >= 0 && g_gtaoPreviousHeight >= 0)
+    Log("  previous applied GTAO resolution: %d x %d", g_gtaoPreviousWidth,
+        g_gtaoPreviousHeight);
+  Log("  current GTAO resolution: %d x %d", oldWidth, oldHeight);
+  Log("  target GTAO resolution: %d x %d", targetWidth, targetHeight);
+  Log("  scale: %.3f", g_gtaoScale);
+  Log("  value: %d x %d -> %d x %d (%s)", oldWidth, oldHeight, targetWidth,
+      targetHeight, wroteValues ? "written" : "unchanged");
+  Log("  result: OK");
+}
+
+void LogShadowConfigFloatResult(const char *settingName, const char *fieldName,
+                                void *beforeCullingParams,
+                                uintptr_t shadowConfigPtr, size_t fieldOffset,
+                                float oldValue, float targetValue, bool ok,
+                                bool wroteValue) {
+  Log("%s apply:", settingName);
+  Log("  IL2CPP field: HGShadowConfigCPP.%s", fieldName);
+  Log("  beforeCullingParams: %p", beforeCullingParams);
+  Log("  shadowConfig pointer: %p", (void *)shadowConfigPtr);
+  Log("  field offset: 0x%zX", fieldOffset);
+  Log("  value address: %p", (void *)(shadowConfigPtr + fieldOffset));
+  if (ok)
+    Log("  value: %.3f -> %.3f (%s)", oldValue, targetValue,
+        wroteValue ? "written" : "unchanged");
+  Log("  result: %s", ok ? "OK" : "FAILED");
+}
+
+void ApplyShadowConfigFloat(const char *settingName, const char *fieldName,
+                            void *beforeCullingParams,
+                            uintptr_t shadowConfigPtr, size_t fieldOffset,
+                            float targetValue, float currentValue,
+                            bool logResult) {
+  bool changed = FloatChanged(currentValue, targetValue);
+  bool ok = true;
+  if (changed)
+    ok = SafeWrite(shadowConfigPtr + fieldOffset, targetValue);
+  if (logResult)
+    LogShadowConfigFloatResult(settingName, fieldName, beforeCullingParams,
+                               shadowConfigPtr, fieldOffset, currentValue,
+                               targetValue, ok, changed && ok);
+}
+
 void HookedRenderPath(int64_t _ptr, void *renderPathParams,
                       void *beforeCullingParams, void *camera,
                       void *renderContext, void *_cmd) {
@@ -1200,16 +1938,36 @@ void HookedRenderPath(int64_t _ptr, void *renderPathParams,
 
           int32_t oldWidth = *pWidth;
           int32_t oldHeight = *pHeight;
+          if (g_gtaoOriginalWidth < 0 || g_gtaoOriginalHeight < 0) {
+            g_gtaoOriginalWidth = oldWidth;
+            g_gtaoOriginalHeight = oldHeight;
+          }
 
           int32_t targetW = (int32_t)(g_screenWidth * g_gtaoScale);
           int32_t targetH = (int32_t)(g_screenHeight * g_gtaoScale);
+          bool changed = oldWidth != targetW || oldHeight != targetH;
 
-          if (oldWidth != targetW || oldHeight != targetH) {
+          if (changed) {
             *pWidth = targetW;
             *pHeight = targetH;
             g_patchCount++;
             g_gtaoPatched = true;
           }
+
+          if (g_logNextGTAOApply) {
+            LogGTAOApplyResult(renderPathParams, gtaoPtr, oldWidth, oldHeight,
+                               targetW, targetH, changed);
+            g_logNextGTAOApply = false;
+          }
+          g_gtaoPreviousWidth = targetW;
+          g_gtaoPreviousHeight = targetH;
+        } else if (g_logNextGTAOApply) {
+          Log("GTAORes apply:");
+          Log("  IL2CPP field: HGRenderPathParamsCPP.gtaoSettingParameters");
+          Log("  renderPathParams: %p", renderPathParams);
+          Log("  gtao settings pointer: null");
+          Log("  result: FAILED");
+          g_logNextGTAOApply = false;
         }
       }
 
@@ -1222,15 +1980,40 @@ void HookedRenderPath(int64_t _ptr, void *renderPathParams,
       uintptr_t shadowConfigPtr = 0;
       if (!SafeRead((uintptr_t)beforeCullingParams +
                         g_renderHookOffsets.beforeCullingShadowConfigPtr,
-                    &shadowConfigPtr))
+                    &shadowConfigPtr)) {
+        if (HasPendingShadowApplyLog()) {
+          Log("HGShadowConfigCPP apply:");
+          Log("  beforeCullingParams: %p", beforeCullingParams);
+          Log("  shadowConfig offset: 0x%zX",
+              g_renderHookOffsets.beforeCullingShadowConfigPtr);
+          Log("  result: FAILED");
+          ClearPendingShadowApplyLogs();
+        }
         goto call_original;
-      if (!shadowConfigPtr)
+      }
+      if (!shadowConfigPtr) {
+        if (HasPendingShadowApplyLog()) {
+          Log("HGShadowConfigCPP apply:");
+          Log("  beforeCullingParams: %p", beforeCullingParams);
+          Log("  shadowConfig pointer: null");
+          Log("  result: FAILED");
+          ClearPendingShadowApplyLogs();
+        }
         goto call_original;
+      }
 
       float currentSoftness = 0.0f;
       if (!SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmSoftness,
-                    &currentSoftness))
+                    &currentSoftness)) {
+        if (HasPendingShadowApplyLog()) {
+          Log("HGShadowConfigCPP apply:");
+          Log("  shadowConfig pointer: %p", (void *)shadowConfigPtr);
+          Log("  first field read: csmShadowSoftness");
+          Log("  result: FAILED");
+          ClearPendingShadowApplyLogs();
+        }
         goto call_original;
+      }
 
       float curDepthBias = 0, curNormalBias = 0, curIntensity = 0;
       SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowCsmDepthBias,
@@ -1250,23 +2033,64 @@ void HookedRenderPath(int64_t _ptr, void *renderPathParams,
       SafeRead(shadowConfigPtr + g_renderHookOffsets.shadowContactContract,
                &contactContract);
 
-      if (g_csmShadowSoftness >= 0 && currentSoftness != g_csmShadowSoftness)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmSoftness, g_csmShadowSoftness);
-      if (g_csmDepthBias >= 0 && curDepthBias != g_csmDepthBias)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmDepthBias, g_csmDepthBias);
-      if (g_csmNormalBias >= 0 && curNormalBias != g_csmNormalBias)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmNormalBias, g_csmNormalBias);
-      if (g_csmIntensity >= 0 && curIntensity != g_csmIntensity)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowCsmIntensity, g_csmIntensity);
+      bool logShadow = HasPendingShadowApplyLog();
 
-      if (g_contactShadowIntensity >= 0 && contactIntensity != g_contactShadowIntensity)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactIntensity, g_contactShadowIntensity);
-      if (g_contactShadowThickness >= 0 && contactThickness != g_contactShadowThickness)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactThickness, g_contactShadowThickness);
-      if (g_contactShadowBilinear >= 0 && contactBilinear != g_contactShadowBilinear)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactBilinear, g_contactShadowBilinear);
-      if (g_contactShadowContract >= 0 && contactContract != g_contactShadowContract)
-        SafeWrite(shadowConfigPtr + g_renderHookOffsets.shadowContactContract, g_contactShadowContract);
+      if (g_csmShadowSoftness >= 0)
+        ApplyShadowConfigFloat("CSMShadowSoftness", "csmShadowSoftness",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowCsmSoftness,
+                               g_csmShadowSoftness, currentSoftness,
+                               g_logNextCsmShadowSoftnessApply);
+      if (g_csmDepthBias >= 0)
+        ApplyShadowConfigFloat("CSMDepthBias", "csmDepthBias",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowCsmDepthBias,
+                               g_csmDepthBias, curDepthBias,
+                               g_logNextCsmDepthBiasApply);
+      if (g_csmNormalBias >= 0)
+        ApplyShadowConfigFloat("CSMNormalBias", "csmNormalBias",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowCsmNormalBias,
+                               g_csmNormalBias, curNormalBias,
+                               g_logNextCsmNormalBiasApply);
+      if (g_csmIntensity >= 0)
+        ApplyShadowConfigFloat("CSMIntensity", "csmIntensity",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowCsmIntensity,
+                               g_csmIntensity, curIntensity,
+                               g_logNextCsmIntensityApply);
+
+      if (g_contactShadowIntensity >= 0)
+        ApplyShadowConfigFloat("ContactShadowIntensity",
+                               "contactShadowIntensity", beforeCullingParams,
+                               shadowConfigPtr,
+                               g_renderHookOffsets.shadowContactIntensity,
+                               g_contactShadowIntensity, contactIntensity,
+                               g_logNextContactShadowIntensityApply);
+      if (g_contactShadowThickness >= 0)
+        ApplyShadowConfigFloat("ContactShadowThickness",
+                               "contactShadowSurfaceThickness",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowContactThickness,
+                               g_contactShadowThickness, contactThickness,
+                               g_logNextContactShadowThicknessApply);
+      if (g_contactShadowBilinear >= 0)
+        ApplyShadowConfigFloat("ContactShadowBilinear",
+                               "contactShadowBilinearThreshold",
+                               beforeCullingParams, shadowConfigPtr,
+                               g_renderHookOffsets.shadowContactBilinear,
+                               g_contactShadowBilinear, contactBilinear,
+                               g_logNextContactShadowBilinearApply);
+      if (g_contactShadowContract >= 0)
+        ApplyShadowConfigFloat("ContactShadowContract",
+                               "contactShadowContract", beforeCullingParams,
+                               shadowConfigPtr,
+                               g_renderHookOffsets.shadowContactContract,
+                               g_contactShadowContract, contactContract,
+                               g_logNextContactShadowContractApply);
+
+      if (logShadow)
+        ClearPendingShadowApplyLogs();
     } __except (EXCEPTION_EXECUTE_HANDLER) {
     }
   }
@@ -1398,28 +2222,81 @@ void ApplyEnhancements() {
   LoadConfig();
   RefreshConfigLastWriteTime();
   GetScreenRes();
-  LogLoadedConfig();
+  LogConfigSelection("Startup", nullptr);
   Log("Screen resolution: %d x %d", g_screenWidth, g_screenHeight);
   bool renderHookOk = TryDirectPatch();
   Log("ApplyEnhancements: renderHook=%s", renderHookOk ? "OK" : "FAILED");
 }
 
-bool ApplyConfigBackedSettings() {
+bool ApplyConfigBackedSettings(const GfxConfigSnapshot *before = nullptr,
+                               const char *reason = "startup") {
   bool allSuccess = true;
 
-  bool shadowOk = ApplyManagedShadowSettings();
+  bool gtaoActive = g_gtaoScale >= 0.0f;
+  bool oldGtaoActive = before ? before->gtaoScale >= 0.0f : false;
+  bool logGtao = ShouldLogFloatApply(g_gtaoScale,
+                                     before ? before->gtaoScale : -1.0f,
+                                     gtaoActive, oldGtaoActive, before);
+  if (gtaoActive && logGtao)
+    g_logNextGTAOApply = true;
+  else if (!gtaoActive && logGtao)
+    LogSettingDisabled("GTAORes");
+
+#define QUEUE_RENDER_FLOAT(configValue, beforeMember, configName, logFlag) \
+  do { \
+    bool active = (configValue) >= 0.0f; \
+    bool oldActive = before ? before->beforeMember >= 0.0f : false; \
+    bool logThis = ShouldLogFloatApply((configValue), \
+                                       before ? before->beforeMember : -1.0f, \
+                                       active, oldActive, before); \
+    if (active && logThis) { \
+      (logFlag) = true; \
+    } else if (!active && logThis) { \
+      (logFlag) = false; \
+      LogSettingDisabled((configName)); \
+    } \
+  } while (0)
+
+  QUEUE_RENDER_FLOAT(g_csmShadowSoftness, csmShadowSoftness,
+                     "CSMShadowSoftness",
+                     g_logNextCsmShadowSoftnessApply);
+  QUEUE_RENDER_FLOAT(g_csmDepthBias, csmDepthBias, "CSMDepthBias",
+                     g_logNextCsmDepthBiasApply);
+  QUEUE_RENDER_FLOAT(g_csmNormalBias, csmNormalBias, "CSMNormalBias",
+                     g_logNextCsmNormalBiasApply);
+  QUEUE_RENDER_FLOAT(g_csmIntensity, csmIntensity, "CSMIntensity",
+                     g_logNextCsmIntensityApply);
+  QUEUE_RENDER_FLOAT(g_contactShadowIntensity, contactShadowIntensity,
+                     "ContactShadowIntensity",
+                     g_logNextContactShadowIntensityApply);
+  QUEUE_RENDER_FLOAT(g_contactShadowThickness, contactShadowThickness,
+                     "ContactShadowThickness",
+                     g_logNextContactShadowThicknessApply);
+  QUEUE_RENDER_FLOAT(g_contactShadowBilinear, contactShadowBilinear,
+                     "ContactShadowBilinear",
+                     g_logNextContactShadowBilinearApply);
+  QUEUE_RENDER_FLOAT(g_contactShadowContract, contactShadowContract,
+                     "ContactShadowContract",
+                     g_logNextContactShadowContractApply);
+
+#undef QUEUE_RENDER_FLOAT
+
+  bool shadowOk = ApplyManagedShadowSettings(before);
   if (shadowOk)
     g_shadowPatched = true;
   else
     allSuccess = false;
 
-  bool graphicsOk = ApplyGraphicsSettings();
-  bool aaOk = ApplyAASettings();
+  bool graphicsOk = ApplyGraphicsSettings(before);
+  bool aaOk = ApplyAASettings(before);
   allSuccess &= graphicsOk && aaOk;
 
-  Log("Apply summary: shadows=%s graphics=%s aa=%s overall=%s",
-      shadowOk ? "OK" : "FAILED", graphicsOk ? "OK" : "FAILED",
-      aaOk ? "OK" : "FAILED", allSuccess ? "OK" : "FAILED");
+  Log("Apply summary:");
+  Log("  reason: %s", reason);
+  Log("  shadows: %s", shadowOk ? "OK" : "FAILED");
+  Log("  graphics: %s", graphicsOk ? "OK" : "FAILED");
+  Log("  aa: %s", aaOk ? "OK" : "FAILED");
+  Log("  overall: %s", allSuccess ? "OK" : "FAILED");
 
   return allSuccess;
 }
@@ -1441,7 +2318,7 @@ DWORD WINAPI EnforcerThread(LPVOID) {
     tick++;
 
     if (!initialSettingsApplied && tick >= 6) {
-      if (ApplyConfigBackedSettings())
+      if (ApplyConfigBackedSettings(nullptr, "startup"))
         initialSettingsApplied = true;
     }
 
@@ -1451,11 +2328,12 @@ DWORD WINAPI EnforcerThread(LPVOID) {
           (DWORD)g_liveEditIntervalMs) {
         lastLiveEditPollTick = now;
         if (HasConfigChangedOnDisk()) {
+          GfxConfigSnapshot before = CaptureConfigSnapshot();
           Log("Live edit: detected EndfieldGFX.ini change");
           LoadConfig();
-          LogLoadedConfig();
+          LogConfigSelection("Live edit", &before);
           RefreshConfigLastWriteTime();
-          if (ApplyConfigBackedSettings())
+          if (ApplyConfigBackedSettings(&before, "live-edit"))
             initialSettingsApplied = true;
         }
       }
