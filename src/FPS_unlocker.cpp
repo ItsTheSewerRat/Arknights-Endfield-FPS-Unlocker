@@ -97,28 +97,8 @@ int main() {
     std::cout << "[ERROR] Failed to extract vulkan-1.dll!" << std::endl;
   }
 
-  std::fstream bootConfig("Endfield_Data\\boot.config", std::ios::in);
-  if (bootConfig.is_open()) {
-    std::string content((std::istreambuf_iterator<char>(bootConfig)),
-                        std::istreambuf_iterator<char>());
-    bootConfig.close();
-
-    // Replace target-frame-rate value
-    size_t pos = content.find("target-frame-rate=");
-    if (pos != std::string::npos) {
-      size_t endPos = content.find('\n', pos);
-      if (endPos == std::string::npos)
-        endPos = content.length();
-      content.replace(pos, endPos - pos,
-                      "target-frame-rate=" + std::to_string(targetFPS));
-
-      std::ofstream out("Endfield_Data\\boot.config");
-      out << content;
-      out.close();
-      std::cout << "[OK] Patched boot.config (target-frame-rate=" << targetFPS
-                << ")" << std::endl;
-    }
-  }
+  std::cout << "[OK] Runtime FPS enforcement will use fps_config.txt"
+            << std::endl;
 
   std::cout << std::endl;
   std::cout << "==================================" << std::endl;

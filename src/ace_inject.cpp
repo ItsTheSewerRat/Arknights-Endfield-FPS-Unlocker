@@ -45,6 +45,7 @@ typedef void *(*Il2CppClassGetMethodFromName)(void *klass, const char *name,
                                               int argsCount);
 typedef void *(*Il2CppRuntimeInvoke)(void *method, void *obj, void **params,
                                      void **exc);
+typedef const char *(*Il2CppImageGetName)(void *image);
 
 Il2CppDomainGet il2cpp_domain_get;
 Il2CppThreadAttach il2cpp_thread_attach;
@@ -53,10 +54,9 @@ Il2CppClassFromName il2cpp_class_from_name;
 Il2CppClassGetMethodFromName il2cpp_class_get_method_from_name;
 Il2CppRuntimeInvoke il2cpp_runtime_invoke;
 Il2CppGetImage il2cpp_assembly_get_image;
+Il2CppImageGetName il2cpp_image_get_name;
 
 HMODULE hGameAssembly = NULL;
-void *g_setTargetFrameRateMethod = NULL;
-void *g_setVSyncCountMethod = NULL;
 bool g_initialized = false;
 
 // --- Il2Cpp MethodInfo Structure ---
@@ -64,16 +64,22 @@ struct Il2CppMethodInfo {
   void *methodPointer;
 };
 
+Il2CppMethodInfo *g_setTargetFrameRateMethod = NULL;
+Il2CppMethodInfo *g_setVSyncCountMethod = NULL;
+
 // --- Hook for set_targetFrameRate ---
-typedef void (*tSetTargetFrameRate)(int fps);
+typedef void (*tSetTargetFrameRate)(int fps, const Il2CppMethodInfo *method);
 tSetTargetFrameRate oSetTargetFrameRate = NULL;
 
-void hkSetTargetFrameRate(int fps) { oSetTargetFrameRate(g_targetFPS); }
+void hkSetTargetFrameRate(int fps, const Il2CppMethodInfo *method) {
+  if (oSetTargetFrameRate)
+    oSetTargetFrameRate(g_targetFPS, method);
+}
 
-void ResolveIl2Cpp() {
+bool ResolveIl2Cpp() {
   hGameAssembly = GetModuleHandleW(L"GameAssembly.dll");
   if (!hGameAssembly)
-    return;
+    return false;
 
   il2cpp_domain_get =
       (Il2CppDomainGet)GetProcAddress(hGameAssembly, "il2cpp_domain_get");
@@ -90,27 +96,79 @@ void ResolveIl2Cpp() {
       hGameAssembly, "il2cpp_runtime_invoke");
   il2cpp_assembly_get_image = (Il2CppGetImage)GetProcAddress(
       hGameAssembly, "il2cpp_assembly_get_image");
+  il2cpp_image_get_name =
+      (Il2CppImageGetName)GetProcAddress(hGameAssembly, "il2cpp_image_get_name");
+
+  return il2cpp_domain_get && il2cpp_thread_attach &&
+         il2cpp_domain_get_assemblies && il2cpp_assembly_get_image &&
+         il2cpp_image_get_name && il2cpp_class_from_name &&
+         il2cpp_class_get_method_from_name && il2cpp_runtime_invoke;
+}
+
+bool AttachCurrentThreadToIl2Cpp() {
+  if (!il2cpp_domain_get || !il2cpp_thread_attach)
+    return false;
+
+  void *domain = il2cpp_domain_get();
+  if (!domain)
+    return false;
+
+  il2cpp_thread_attach(domain);
+  return true;
+}
+
+void *FindImage(const char *name) {
+  if (!name || !il2cpp_domain_get || !il2cpp_domain_get_assemblies ||
+      !il2cpp_assembly_get_image || !il2cpp_image_get_name)
+    return NULL;
+
+  void *domain = il2cpp_domain_get();
+  if (!domain)
+    return NULL;
+
+  size_t size = 0;
+  void **assemblies = (void **)il2cpp_domain_get_assemblies(domain, &size);
+  if (!assemblies)
+    return NULL;
+
+  for (size_t i = 0; i < size; i++) {
+    void *image = il2cpp_assembly_get_image(assemblies[i]);
+    if (!image)
+      continue;
+
+    const char *imageName = il2cpp_image_get_name(image);
+    if (imageName && strstr(imageName, name))
+      return image;
+  }
+
+  return NULL;
 }
 
 void ApplyFPSSettings() {
   if (!g_initialized || !il2cpp_runtime_invoke)
     return;
 
-  if (g_setTargetFrameRateMethod) {
-    void *params[] = {&g_targetFPS};
-    il2cpp_runtime_invoke(g_setTargetFrameRateMethod, NULL, params, NULL);
-  }
+  if (!AttachCurrentThreadToIl2Cpp())
+    return;
 
   // Force VSync off
   if (g_setVSyncCountMethod) {
     int vsync = 0;
     void *params[] = {&vsync};
-    il2cpp_runtime_invoke(g_setVSyncCountMethod, NULL, params, NULL);
+    void *exc = NULL;
+    il2cpp_runtime_invoke(g_setVSyncCountMethod, NULL, params, &exc);
+  }
+
+  if (g_setTargetFrameRateMethod) {
+    void *params[] = {&g_targetFPS};
+    void *exc = NULL;
+    il2cpp_runtime_invoke(g_setTargetFrameRateMethod, NULL, params, &exc);
   }
 }
 
 // Background thread that continuously enforces FPS
 DWORD WINAPI FPSEnforcerThread(LPVOID lpParam) {
+  AttachCurrentThreadToIl2Cpp();
   while (true) {
     Sleep(5000); // Check every 5 seconds
     ApplyFPSSettings();
@@ -118,39 +176,32 @@ DWORD WINAPI FPSEnforcerThread(LPVOID lpParam) {
   return 0;
 }
 
-void RunIl2CppHook() {
+bool RunIl2CppHook() {
   if (!hGameAssembly)
-    return;
+    return false;
   if (!il2cpp_domain_get || !il2cpp_runtime_invoke)
-    return;
+    return false;
 
   void *domain = il2cpp_domain_get();
-  il2cpp_thread_attach(domain);
+  if (!domain || !AttachCurrentThreadToIl2Cpp())
+    return false;
 
-  size_t size = 0;
-  void **assemblies = (void **)il2cpp_domain_get_assemblies(domain, &size);
-  void *unityEngineImage = NULL;
-
-  for (size_t i = 0; i < size; i++) {
-    void *image = il2cpp_assembly_get_image(assemblies[i]);
-    if (il2cpp_class_from_name(image, "UnityEngine", "Application")) {
-      unityEngineImage = image;
-      break;
-    }
-  }
-
+  void *unityEngineImage = FindImage("UnityEngine.CoreModule");
   if (!unityEngineImage)
-    return;
+    return false;
 
   // Get Application.set_targetFrameRate
   void *appClass =
       il2cpp_class_from_name(unityEngineImage, "UnityEngine", "Application");
+  if (!appClass)
+    return false;
+
   Il2CppMethodInfo *methodInfo =
       (Il2CppMethodInfo *)il2cpp_class_get_method_from_name(
           appClass, "set_targetFrameRate", 1);
 
   if (methodInfo && methodInfo->methodPointer) {
-    g_setTargetFrameRateMethod = (void *)methodInfo;
+    g_setTargetFrameRateMethod = methodInfo;
 
     // Hook it
     if (MH_CreateHook(methodInfo->methodPointer, &hkSetTargetFrameRate,
@@ -167,9 +218,12 @@ void RunIl2CppHook() {
         (Il2CppMethodInfo *)il2cpp_class_get_method_from_name(
             qualityClass, "set_vSyncCount", 1);
     if (vsyncMethod) {
-      g_setVSyncCountMethod = (void *)vsyncMethod;
+      g_setVSyncCountMethod = vsyncMethod;
     }
   }
+
+  if (!g_setTargetFrameRateMethod)
+    return false;
 
   g_initialized = true;
 
@@ -178,6 +232,7 @@ void RunIl2CppHook() {
 
   // Start background enforcer thread
   CreateThread(NULL, 0, FPSEnforcerThread, NULL, 0, NULL);
+  return true;
 }
 
 // --- Stealth setup ---
@@ -242,10 +297,11 @@ void Setup() {
   }
   MH_EnableHook(MH_ALL_HOOKS);
 
-  Sleep(15000);
-
-  ResolveIl2Cpp();
-  RunIl2CppHook();
+  for (int i = 0; i < 60; i++) {
+    if (ResolveIl2Cpp() && RunIl2CppHook())
+      return;
+    Sleep(1000);
+  }
 }
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD reason, LPVOID reserved) {
